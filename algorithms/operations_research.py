@@ -1,54 +1,20 @@
-"""
-OR-style selector for (d,t) using:
-- Effort term: keep predicted hit probability near target p*
-- Variability term: encourage coverage over 9 (distance_level x time_level) bins
-- Smoothness term: discourage large jumps in d and t between trials
-
-Uses your PatientModel from patient_simulation.py as the environment.
-"""
-
-import os
 import math
-import numpy as np
-import matplotlib.pyplot as plt
 import importlib.util
+from pathlib import Path
 
-# ============================================================
-PATIENT_SIM_PATH = "patient_simulation_v3.py"  # adjust if needed
-spec = importlib.util.spec_from_file_location("patient_simulation_v3", PATIENT_SIM_PATH)
-patient_mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(patient_mod)
+import numpy as np
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+
+def _load_module_from_path(module_name, module_path):
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+PATIENT_SIM_PATH = BASE_DIR / "patients" / "patient_simulation_v3.py"
+patient_mod = _load_module_from_path("patients.patient_simulation_v3", PATIENT_SIM_PATH)
 PatientModel = patient_mod.PatientModel
-PATIENT_SPEED = 0.08 # m/s
-PATIENT_SPEED_SD = 0.04 # m/s
-
-matrix_spec = importlib.util.spec_from_file_location("make_ideal_distribution", "tests/make_ideal_distribution.py")
-matrix_mod = importlib.util.module_from_spec(matrix_spec)
-matrix_spec.loader.exec_module(matrix_mod)
-true_p_hit = matrix_mod.estimate_true_phit_matrix(patient_seed=7, 
-                                                  mc_per_cell=1000, 
-                                                  patient_speed=PATIENT_SPEED, 
-                                                  patient_speed_sd=PATIENT_SPEED_SD)
-ideal_matrix = matrix_mod.make_ideal_distribution(true_p_hit, target_prob=0.6, variability=0.25, total_trials=200)
-# ============================================================
-
-def plot_heatmap(mat, title, xlabels, ylabels, annotate=True):
-    plt.figure()
-    plt.imshow(mat, aspect="auto")
-    plt.title(title)
-    plt.xticks(range(len(xlabels)), xlabels)
-    plt.yticks(range(len(ylabels)), ylabels)
-    if annotate:
-        for i in range(mat.shape[0]):
-            for j in range(mat.shape[1]):
-                if mat.dtype == int:
-                    txt = str(mat[i, j])
-                else:
-                    txt = f"{mat[i, j]:.2f}"
-                plt.text(j, i, txt, ha="center", va="center", fontsize=8)
-    plt.colorbar()
-    plt.tight_layout()
-    plt.show()
 
 
 # ----------------------------
@@ -193,11 +159,8 @@ def score_candidate(d, t, *,
 # ----------------------------
 # Main loop
 # ----------------------------
-def run_controller(n_trials=250, seed=7):
+def run_sim(patient: PatientModel, n_trials=250, seed=7):
     rng = np.random.default_rng(seed)
-    patient = PatientModel(seed=seed,
-                           v_mean=PATIENT_SPEED,
-                           v_sigma=PATIENT_SPEED_SD)  # your simulator
 
     # Online estimates (speed model)
     v_patient = [] 
@@ -291,12 +254,3 @@ def run_controller(n_trials=250, seed=7):
 
     return hist, counts_5x5
 
-if __name__ == "__main__":
-    hist, counts = run_controller(n_trials=200, seed=42)
-    plot_heatmap(ideal_matrix, "Ideal distribution",
-                 xlabels=["shortest", "short", "medium", "long", "longest"],
-                 ylabels=["closest", "close", "medium", "far", "farthest"], annotate=True)
-    plot_heatmap(counts, "Actual selection counts",
-                 xlabels=["shortest", "short", "medium", "long", "longest"],
-                 ylabels=["closest", "close", "medium", "far", "farthest"], annotate=True)
-    print(f"Absolute difference: {np.abs(counts - ideal_matrix).sum()}")

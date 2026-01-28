@@ -29,7 +29,7 @@ PATIENT_PROFILES = {
     },
     "highspeed_lowrom" : {
         "k_d0_per_sec": 0.45,
-        "k_d_decay": 0.30,
+        "k_d_decay": 0.5,
         "v_sigma0": 0.04,
         "v_sigma_growth": 0.05
     },
@@ -40,6 +40,12 @@ PATIENT_PROFILES = {
         "v_sigma_growth": 0.02
     }
 }
+
+ALGORITHMS = ["operations_research",
+              "QUEST_v2",
+              "staircasing",
+              "RL_logistic_index_simplified",
+              "control_system_v2"]
 
 def _load_module_from_path(module_name, module_path):
     spec = importlib.util.spec_from_file_location(module_name, module_path)
@@ -106,6 +112,11 @@ def _load_algorithm(algorithm_name):
         raise FileNotFoundError(f"No algorithm file found: {path}")
     module_name = f"algorithms.{path.stem}"
     return _load_module_from_path(module_name, path)
+
+
+def _load_visualization_module():
+    module_path = BASE_DIR / "tests" / "visualization.py"
+    return _load_module_from_path("tests.visualization", module_path)
 
 
 def plot_v_mean_by_profile(t_min=None, t_max=None, t_steps=200):
@@ -252,10 +263,128 @@ def run_algorithm(algorithm_name, *args, patient_profile=None, **kwargs):
         f"Tried: {', '.join(entrypoints)}"
     )
 
-# for profile in PATIENT_PROFILES.keys():
-#     plot_phit_and_ideal_by_profile(profile)
-#     plt.show()
+plot_d_by_profile()
+plt.show()
+plot_v_mean_by_profile()
+plt.show()
 
-logs, counts = run_algorithm(algorithm_name="control_system_v2",
-                             patient_profile="overall_strong")
-print(counts)
+if __name__ == "__main__":
+    # for profile in PATIENT_PROFILES.keys():
+    #     plot_phit_and_ideal_by_profile(profile)
+    #     plt.show()
+    
+    for algorithm in ALGORITHMS:
+        print(f"Running algorithm: {algorithm}")   
+        logs, counts = run_algorithm(algorithm_name=algorithm,
+                                    patient_profile="lowspeed_highrom")
+        plot_heatmap = _load_visualization_module().plot_heatmap
+        # plot_heatmap(counts,
+        #              title=f"Counts heatmap for {algorithm} - lowspeed_highrom",
+        #              xlabels=["shortest", "short", "medium", "long", "longest"],
+        #              ylabels=["closest", "close", "medium", "far", "farthest"])
+        # plt.show()
+
+    # def _ideal_distribution_for_profile(profile_name, mc_per_cell=300, target_prob=0.6, variability=0.25, total_trials=200):
+    #     patient_params = PATIENT_PROFILES[profile_name]
+    #     patient_seed = int(patient_params.get("seed", 7))
+
+    #     ideal_mod = _load_ideal_distribution_module()
+    #     estimate_true_phit_matrix = ideal_mod["estimate_true_phit_matrix"]
+    #     make_ideal_distribution = ideal_mod["make_ideal_distribution"]
+    #     PatientModel = _load_patient_model()
+
+    #     class _ProfilePatientModel(PatientModel):
+    #         _profile_params = patient_params
+
+    #         def __init__(self, *args, **kwargs):
+    #             params = dict(self._profile_params)
+    #             params.setdefault("seed", kwargs.get("seed", 7))
+    #             if "v_sigma0" not in params and "v_sigma" in kwargs:
+    #                 params["v_sigma0"] = kwargs["v_sigma"]
+    #             params.update({k: v for k, v in kwargs.items() if k in {"seed"}})
+    #             super().__init__(**params)
+
+    #     estimate_true_phit_matrix.__globals__["PatientModel"] = _ProfilePatientModel
+    #     estimate_true_phit_matrix.__globals__["np"] = np
+    #     estimate_true_phit_matrix.__globals__["distance_level_from_patient_bins"] = ideal_mod["distance_level_from_patient_bins"]
+    #     estimate_true_phit_matrix.__globals__["D_BINS"] = ideal_mod["D_BINS"]
+    #     estimate_true_phit_matrix.__globals__["T_BINS"] = ideal_mod["T_BINS"]
+
+    #     phit_true = estimate_true_phit_matrix(
+    #         patient_seed=patient_seed,
+    #         patient_speed_sd=patient_params.get("v_sigma0", 0.04),
+    #         mc_per_cell=mc_per_cell,
+    #     )
+    #     ideal_dist = make_ideal_distribution(
+    #         phit_true,
+    #         target_prob=target_prob,
+    #         variability=variability,
+    #         total_trials=total_trials,
+    #     )
+    #     return ideal_dist
+
+    # def _bin25(d, t, d_min, d_max, t_min, t_max):
+    #     u_d = (d - d_min) / (d_max - d_min + 1e-12)
+    #     u_t = (t - t_min) / (t_max - t_min + 1e-12)
+    #     if u_d < 0.2:
+    #         i = 0
+    #     elif u_d < 0.4:
+    #         i = 1
+    #     elif u_d < 0.6:
+    #         i = 2
+    #     elif u_d < 0.8:
+    #         i = 3
+    #     else:
+    #         i = 4
+    #     if u_t < 0.2:
+    #         j = 0
+    #     elif u_t < 0.4:
+    #         j = 1
+    #     elif u_t < 0.6:
+    #         j = 2
+    #     elif u_t < 0.8:
+    #         j = 3
+    #     else:
+    #         j = 4
+    #     return i, j
+
+    # def _counts_from_hist(hist, d_min, d_max, t_min, t_max):
+    #     counts = np.zeros((5, 5), dtype=int)
+    #     for d, t in zip(hist["d"], hist["t"]):
+    #         i, j = _bin25(float(d), float(t), d_min, d_max, t_min, t_max)
+    #         counts[i, j] += 1
+    #     return counts
+
+    # ideal_mod = _load_ideal_distribution_module()
+    # d_min = float(ideal_mod["D_MIN"])
+    # d_max = float(ideal_mod["D_MAX"])
+    # t_min = float(ideal_mod["T_MIN"])
+    # t_max = float(ideal_mod["T_MAX"])
+
+    # alg_names = list(ALGORITHMS)
+    # profile_names = list(PATIENT_PROFILES.keys())
+    # diff_matrix = np.zeros((len(alg_names), len(profile_names)), dtype=float)
+
+    # for i, alg in enumerate(alg_names):
+    #     for j, profile in enumerate(profile_names):
+    #         result = run_algorithm(alg, patient_profile=profile)
+    #         if isinstance(result, tuple) and len(result) == 2:
+    #             hist, counts = result
+    #         elif isinstance(result, dict):
+    #             hist = result.get("hist", {})
+    #             counts = _counts_from_hist(hist, d_min, d_max, t_min, t_max)
+    #         else:
+    #             raise TypeError(f"Unexpected return type from {alg}: {type(result)}")
+
+    #         ideal_dist = _ideal_distribution_for_profile(profile)
+    #         diff_matrix[i, j] = float(np.abs(counts - ideal_dist).sum())
+
+    # plot_heatmap = _load_visualization_module().plot_heatmap
+    # plot_heatmap(
+    #     diff_matrix,
+    #     title="Total absolute difference vs ideal distribution",
+    #     xlabels=profile_names,
+    #     ylabels=alg_names,
+    #     annotate=True,
+    # )
+    # plt.show()

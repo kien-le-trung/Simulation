@@ -4,28 +4,24 @@
 # Requires: numpy, matplotlib
 # Uses your patient simulator: patient_simulation_v2.py  :contentReference[oaicite:0]{index=0}
 
-import numpy as np
-import matplotlib.pyplot as plt
 import importlib.util
+from pathlib import Path
 
-# ============================================================
-PATIENT_SIM_PATH = "patient_simulation_v3.py"  # adjust if needed
-spec = importlib.util.spec_from_file_location("patient_simulation_v3", PATIENT_SIM_PATH)
-patient_mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(patient_mod)
+import numpy as np
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+
+
+def _load_module_from_path(module_name, module_path):
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+PATIENT_SIM_PATH = BASE_DIR / "patients" / "patient_simulation_v3.py"
+patient_mod = _load_module_from_path("patients.patient_simulation_v3", PATIENT_SIM_PATH)
 PatientModel = patient_mod.PatientModel
-PATIENT_SPEED = 0.12 # m/s
-PATIENT_SPEED_SD = 0.06 # m/s
-
-matrix_spec = importlib.util.spec_from_file_location("make_ideal_distribution", "tests/make_ideal_distribution.py")
-matrix_mod = importlib.util.module_from_spec(matrix_spec)
-matrix_spec.loader.exec_module(matrix_mod)
-true_p_hit = matrix_mod.estimate_true_phit_matrix(patient_seed=7, 
-                                                  mc_per_cell=1000, 
-                                                  patient_speed=PATIENT_SPEED, 
-                                                  patient_speed_sd=PATIENT_SPEED_SD)
-ideal_matrix = matrix_mod.make_ideal_distribution(true_p_hit, target_prob=0.6, variability=0.25, total_trials=200)
-# ============================================================
 
 # -----------------------------
 # Discretize d, t into 5 levels
@@ -175,6 +171,7 @@ class DifficultyIndexLogReg:
 # Controller run
 # -----------------------------
 def run_controller(
+    patient: PatientModel,
     n_trials=200,
     seed=7,
     p_star=0.65,
@@ -182,9 +179,6 @@ def run_controller(
     p_jitter=0.75,
 ):
     rng = np.random.default_rng(seed)
-    patient = PatientModel(seed=seed,
-                           v_mean=PATIENT_SPEED,
-                           v_sigma=PATIENT_SPEED_SD)
 
     model = DifficultyIndexLogReg(
         rng=rng,
@@ -307,135 +301,3 @@ def run_controller(
     return hist, counts
 
 
-# -----------------------------
-# Evaluation + plots
-# -----------------------------
-def normalize_counts(counts):
-    s = counts.sum()
-    if s <= 0:
-        return np.ones_like(counts, dtype=float) / counts.size
-    return counts / s
-
-
-def kl_divergence(p, q, eps=1e-12):
-    p = np.clip(p, eps, 1.0)
-    q = np.clip(q, eps, 1.0)
-    return float(np.sum(p * np.log(p / q)))
-
-
-def mse(a, b):
-    return float(np.mean((a - b) ** 2))
-
-
-def plot_heatmap(mat, title, xlabels, ylabels, annotate=True):
-    plt.figure()
-    plt.imshow(mat, aspect="auto")
-    plt.title(title)
-    plt.xticks(range(len(xlabels)), xlabels)
-    plt.yticks(range(len(ylabels)), ylabels)
-    if annotate:
-        for i in range(mat.shape[0]):
-            for j in range(mat.shape[1]):
-                if mat.dtype == int:
-                    txt = str(mat[i, j])
-                else:
-                    txt = f"{mat[i, j]:.2f}"
-                plt.text(j, i, txt, ha="center", va="center", fontsize=8)
-    plt.colorbar()
-    plt.tight_layout()
-    plt.show()
-
-
-def visualize(hist, counts, phit_true, ideal_dist, p_star):
-    d = np.array(hist["d"])
-    t = np.array(hist["t"])
-    d_sys = np.array(hist["d_sys"])
-    t_sys = np.array(hist["t_sys"])
-    p_int = np.array(hist["p_pred_intended"])
-    p_exec = np.array(hist["p_pred_exec"])
-    uncert = np.array(hist["uncert"])
-    roll = np.array(hist["rolling_hit"])
-
-    beta0 = np.array(hist["beta0"])
-    beta1 = np.array(hist["beta1"])
-    wd = np.array(hist["w_d"])
-    wt = np.array(hist["w_t"])
-
-    # 2) p prediction vs rolling hit
-    plt.figure()
-    plt.plot(p_int, label="predicted P(hit) @ intended")
-    plt.plot(roll, linestyle="--", label="rolling hit rate")
-    plt.axhline(p_star, linestyle=":", label=f"p_star={p_star}")
-    plt.ylim(-0.05, 1.05)
-    plt.xlabel("trial")
-    plt.title("Model prediction vs realized performance")
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
-    # 3) uncertainty
-    plt.figure()
-    plt.plot(uncert)
-    plt.xlabel("trial")
-    plt.ylabel("uncertainty (peaks at p=0.5)")
-    plt.title("Active-learning uncertainty of chosen actions")
-    plt.tight_layout()
-    plt.show()
-
-    # 4) parameters over time
-    plt.figure()
-    plt.plot(beta0, label="beta0")
-    plt.plot(beta1, label="beta1")
-    plt.xlabel("trial")
-    plt.title("Logistic regression parameters")
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
-    plt.figure()
-    plt.plot(wd, label="w_d (distance weight)")
-    plt.plot(wt, label="w_t (time weight)")
-    plt.xlabel("trial")
-    plt.title("Difficulty index weights (RL-updated)")
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
-    # heatmaps
-    xlabels = ["shortest", "short", "medium", "long", "longest"]  # time bins
-    ylabels = ["closest", "close", "medium", "far", "farthest"]   # distance bins
-
-    plot_heatmap(counts, "Selection counts (5x5 action grid)", xlabels, ylabels, annotate=True)
-    plot_heatmap(phit_true, "True P(hit) per cell (Monte Carlo)", xlabels, ylabels, annotate=True)
-
-    learned_dist = normalize_counts(counts)
-    plot_heatmap(ideal_dist, "Ideal selection distribution (targeting p_star contour)", xlabels, ylabels, annotate=True)
-    plot_heatmap(learned_dist, "Learned selection distribution", xlabels, ylabels, annotate=True)
-
-    diff = learned_dist - ideal_dist
-    plot_heatmap(diff, "Learned - Ideal distribution", xlabels, ylabels, annotate=True)
-
-
-# -----------------------------
-# Main
-# -----------------------------
-if __name__ == "__main__":
-    P_STAR = 0.65
-
-    # run controller (with jitter during execution)
-    hist, counts = run_controller(
-        n_trials=200,
-        seed=7,
-        p_star=P_STAR,
-        explore_prob=0.15,
-        p_jitter=0.25,
-    )
-    print(counts)
-
-    plot_heatmap(ideal_matrix, "Ideal distribution",
-                 xlabels=["shortest", "short", "medium", "long", "longest"],
-                 ylabels=["closest", "close", "medium", "far", "farthest"], annotate=True)
-    plot_heatmap(counts, "Actual selection counts",
-                 xlabels=["shortest", "short", "medium", "long", "longest"],
-                 ylabels=["closest", "close", "medium", "far", "farthest"], annotate=True)
-    print(f"Absolute difference: {np.abs(counts - ideal_matrix).sum()}")

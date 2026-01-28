@@ -1,19 +1,27 @@
 # quest_plus_dt.py
-import numpy as np
-import matplotlib.pyplot as plt
-import math
 import importlib.util
+import math
+from pathlib import Path
 
-# ----------------------------
-# Load your patient simulator
-# ----------------------------
-PATIENT_SIM_PATH = "patient_simulation_v2.py"  # adjust if needed
+import numpy as np
 
-spec = importlib.util.spec_from_file_location("patient_simulation_v2", PATIENT_SIM_PATH)
-patient_sim = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(patient_sim)
+BASE_DIR = Path(__file__).resolve().parents[1]
+
+
+def _load_module_from_path(module_name, module_path):
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+PATIENT_SIM_PATH = BASE_DIR / "patients" / "patient_simulation_v3.py"
+patient_sim = _load_module_from_path("patients.patient_simulation_v3", PATIENT_SIM_PATH)
 PatientModel = patient_sim.PatientModel
 
+
+D_MIN, D_MAX = 0.10, 0.80
+T_MIN, T_MAX = 1.0, 7.0
 
 # ----------------------------
 # QUEST+ helpers
@@ -92,11 +100,30 @@ def map_distance_level(patient: PatientModel, d_sys: float) -> int:
         return 0
     return int(idxs[-1])
 
+def level5(x, xmin, xmax):
+    """
+    Map x in [xmin,xmax] -> {0,1,2,3,4} by fifths.
+    Bin 0 = shortest/closest (0-20th percentile)
+    Bin 1 = short/close (20-40th percentile)
+    Bin 2 = medium (40-60th percentile)
+    Bin 3 = long/far (60-80th percentile)
+    Bin 4 = longest/farthest (80-100th percentile)
+    """
+    u = (x - xmin) / (xmax - xmin + 1e-12)
+    if u < 0.2: return 0
+    if u < 0.4: return 1
+    if u < 0.6: return 2
+    if u < 0.8: return 3
+    return 4
+
+def bin25(d, t):
+    return (level5(d, D_MIN, D_MAX), level5(t, T_MIN, T_MAX))  # (dist_level, time_level)
 
 # ----------------------------
 # QUEST+ main
 # ----------------------------
 def run_quest_plus_dt(
+    patient: PatientModel,
     n_trials=120,
     p_target=0.65,
     p_tol=0.08,
@@ -119,13 +146,14 @@ def run_quest_plus_dt(
     Returns: dict with posterior, grids, and trial history.
     """
     rng = np.random.default_rng(seed)
-    patient = PatientModel(seed=seed)
+
+    counts = np.zeros((5, 5), dtype=int)
 
     # default grids (keep modest to avoid huge compute)
     if d_grid is None:
-        d_grid = np.round(np.arange(0.10, 0.81, 0.05), 4)   # 15 values
+        d_grid = np.round(np.arange(D_MIN, D_MAX + 0.01, 0.05), 4)   # 15 values
     if t_grid is None:
-        t_grid = np.round(np.arange(1.00, 7.01, 0.25), 4)   # 25 values
+        t_grid = np.round(np.arange(T_MIN, T_MAX + 0.01, 0.25), 4)   # 25 values
 
     if b0_grid is None:
         b0_grid = np.round(np.linspace(-6.0, 6.0, 17), 4)   # intercept
@@ -176,6 +204,9 @@ def run_quest_plus_dt(
         chosen = min(near, key=lambda x: x[0]) if len(near) > 0 else min(cand, key=lambda x: x[0])
         EH_best, p_pred_best, d_sys, t_sys = chosen
 
+        i, j = bin25(d_sys, t_sys)
+        counts[i, j] += 1
+
         # 3) Query patient simulator
         lvl = map_distance_level(patient, d_sys)
         out = patient.sample_trial(t_sys=t_sys, d_sys=d_sys, distance_level=lvl, previous_hit=prev_hit)
@@ -200,150 +231,4 @@ def run_quest_plus_dt(
         hist["dist_ratio"].append(float(out["dist_ratio"]))
         hist["H_post"].append(entropy(posterior))
 
-    return {
-        "posterior": posterior,
-        "d_grid": d_grid,
-        "t_grid": t_grid,
-        "b0_grid": b0_grid,
-        "b1_grid": b1_grid,
-        "b2_grid": b2_grid,
-        "hist": hist,
-        "patient": patient,
-    }
-
-
-# ----------------------------
-# Visualization
-# ----------------------------
-def posterior_marginals(result):
-    post = result["posterior"]
-    b0_grid = result["b0_grid"]
-    b1_grid = result["b1_grid"]
-    b2_grid = result["b2_grid"]
-
-    p_b0 = post.sum(axis=(1, 2))
-    p_b1 = post.sum(axis=(0, 2))
-    p_b2 = post.sum(axis=(0, 1))
-
-    return (b0_grid, p_b0), (b1_grid, p_b1), (b2_grid, p_b2)
-
-
-def predictive_p_hit_surface(result):
-    """
-    Compute posterior-predictive p_hit(d,t) over the (d,t) grid.
-    """
-    posterior = result["posterior"]
-    d_grid = result["d_grid"]
-    t_grid = result["t_grid"]
-    b0_grid = result["b0_grid"]
-    b1_grid = result["b1_grid"]
-    b2_grid = result["b2_grid"]
-    B0, B1, B2 = cartesian_params(b0_grid, b1_grid, b2_grid)
-
-    P = np.zeros((len(d_grid), len(t_grid)), dtype=float)
-    for i, d in enumerate(d_grid):
-        for j, t in enumerate(t_grid):
-            p_hit = p_hit_model(float(d), float(t), B0, B1, B2)
-            P[i, j] = float(np.sum(posterior * p_hit))
-    return P
-
-
-def rolling_mean(x, w=10):
-    x = np.asarray(x, dtype=float)
-    if len(x) < w:
-        return x
-    return np.convolve(x, np.ones(w) / w, mode="valid")
-
-
-def plot_quest_plus_results(result, p_target=0.65):
-    hist = result["hist"]
-    d = np.array(hist["d"])
-    t = np.array(hist["t"])
-    hit = np.array(hist["hit"])
-    p_pred = np.array(hist["p_pred"])
-    H_post = np.array(hist["H_post"])
-
-    # 1) trajectory of chosen (d,t)
-    plt.figure()
-    plt.scatter(d, t, s=14)
-    plt.title("QUEST+ chosen (d,t) across trials")
-    plt.xlabel("Distance d (m)")
-    plt.ylabel("Time-to-live t (s)")
-    plt.show()
-
-    # 2) predicted p(hit) vs rolling hit-rate
-    plt.figure()
-    plt.plot(p_pred, label="posterior-predictive p(hit) at chosen (d,t)")
-    rm = rolling_mean(hit, w=10)
-    plt.plot(np.arange(len(rm)) + 10 - 1, rm, linestyle="--", label="rolling hit rate (w=10)")
-    plt.axhline(p_target, linestyle=":", label=f"target p={p_target:.2f}")
-    plt.ylim(-0.05, 1.05)
-    plt.title("Targeting hit probability")
-    plt.xlabel("Trial")
-    plt.ylabel("Probability / rate")
-    plt.legend()
-    plt.show()
-
-    # 3) posterior entropy over time
-    plt.figure()
-    plt.plot(H_post)
-    plt.title("Posterior entropy over trials (should generally decrease)")
-    plt.xlabel("Trial")
-    plt.ylabel("Entropy")
-    plt.show()
-
-    # 4) posterior marginals
-    (b0_grid, p_b0), (b1_grid, p_b1), (b2_grid, p_b2) = posterior_marginals(result)
-
-    plt.figure()
-    plt.plot(b0_grid, p_b0)
-    plt.title("Posterior marginal: B0")
-    plt.xlabel("B0")
-    plt.ylabel("Posterior mass")
-    plt.show()
-
-    plt.figure()
-    plt.plot(b1_grid, p_b1)
-    plt.title("Posterior marginal: B1")
-    plt.xlabel("B1")
-    plt.ylabel("Posterior mass")
-    plt.show()
-
-    plt.figure()
-    plt.plot(b2_grid, p_b2)
-    plt.title("Posterior marginal: B2")
-    plt.xlabel("B2")
-    plt.ylabel("Posterior mass")
-    plt.show()
-
-    # 5) posterior-predictive p(hit) surface over (d,t), with sampled points overlay
-    P = predictive_p_hit_surface(result)
-    d_grid = result["d_grid"]
-    t_grid = result["t_grid"]
-
-    plt.figure()
-    plt.imshow(
-        P.T,
-        origin="lower",
-        aspect="auto",
-        extent=[d_grid[0], d_grid[-1], t_grid[0], t_grid[-1]],
-    )
-    plt.colorbar(label="posterior-predictive p(hit)")
-    plt.scatter(d, t, s=10, marker="o")
-    plt.title("Posterior-predictive p(hit) over (d,t) + chosen samples")
-    plt.xlabel("d (m)")
-    plt.ylabel("t (s)")
-    plt.show()
-
-
-# ----------------------------
-# Example usage
-# ----------------------------
-if __name__ == "__main__":
-    res = run_quest_plus_dt(
-        n_trials=200,
-        p_target=0.6,
-        p_tol=0.1,
-        seed=7,
-    )
-    plot_quest_plus_results(res, p_target=0.6)
+    return hist, counts
