@@ -18,7 +18,7 @@ PatientModel = patient_mod.PatientModel
 
 
 # ----------------------------
-# Candidate lattice (d,t)
+# Candidate lattice (d,t,dir)
 # ----------------------------
 D_MIN, D_MAX = 0.10, 0.80
 T_MIN, T_MAX = 1.0, 7.0
@@ -29,7 +29,11 @@ T_STEP = 0.25   # seconds
 
 d_grid = np.round(np.arange(D_MIN, D_MAX + 1e-9, D_STEP), 4)
 t_grid = np.round(np.arange(T_MIN, T_MAX + 1e-9, T_STEP), 4)
-CANDIDATES = np.array([(d, t) for d in d_grid for t in t_grid], dtype=float)
+N_DIRECTIONS = 8
+CANDIDATES = np.array(
+    [(d, t, direction) for d in d_grid for t in t_grid for direction in range(N_DIRECTIONS)],
+    dtype=float,
+)
 
 
 # ----------------------------
@@ -89,17 +93,14 @@ def p_hit_from_speed(d, t, v_hat, sigma_v):
     # 1 - Phi(z) using erf
     return 0.5 * (1.0 - math.erf(z / math.sqrt(2.0)))
 
-# The higher the speed, the higher the score
-# def speed_z_score(d, t, v_hat, sigma_v):
-#     v_req = d / max(t, 1e-9)
-#     if sigma_v < 1e-6:
-#         return float('inf') if v_hat >= v_req else float('-inf')
-#     z = (v_req - v_hat) / sigma_v
-#     return z
 
-# # The higher the ROM, the higher the score
-# def rom_score(d, patient: PatientModel):
-#     return d / patient.d_means[-1]
+def combine_hit_probs_odds(p_dt, p_dir, eps=1e-9):
+    p_dt = float(np.clip(p_dt, eps, 1.0 - eps))
+    p_dir = float(np.clip(p_dir, eps, 1.0 - eps))
+    odds_dt = p_dt / (1.0 - p_dt)
+    odds_dir = p_dir / (1.0 - p_dir)
+    odds = odds_dt * odds_dir
+    return odds / (1.0 + odds)
 
 
 # ----------------------------
@@ -118,6 +119,7 @@ def distance_level_from_patient_bins(patient: PatientModel, d_sys: float) -> int
 # ----------------------------
 def score_candidate(d, t, *,
                     v_hat, sigma_v,
+                    p_dir,
                     p_star,
                     counts_5x5,
                     d_prev, t_prev,
@@ -125,7 +127,8 @@ def score_candidate(d, t, *,
                     p_min=0.10,
                     patient: PatientModel):
     # effort: keep predicted hit prob near p_star (hard but doable)
-    p = p_hit_from_speed(d, t, v_hat, sigma_v)
+    p_dt = p_hit_from_speed(d, t, v_hat, sigma_v)
+    p = combine_hit_probs_odds(p_dt, p_dir)
     if p < p_min:
         return -1e9, p  # hard safety filter
 
@@ -143,13 +146,7 @@ def score_candidate(d, t, *,
     var_max = math.log(total + 25) if total > 0 else math.log(25)
     var_normalized = var_raw / (var_max + 1e-9)  # 1 = maximally rare bin
 
-    # maximizing speed
-    # speed_score = speed_z_score(d, t, v_hat, sigma_v)
-
-    # maximizing ROM
-    # rom = rom_score(d, patient)
-
-    score = w_eff * eff_normalized + w_var * var_normalized #+ speed_score * 0.5 + rom * 0.5
+    score = w_eff * eff_normalized + w_var * var_normalized
 
     """Interestingly, adding the rom and speed score does not really change the overall behavior much, but it gives prioritize to  higher d and t"""
 
@@ -159,7 +156,7 @@ def score_candidate(d, t, *,
 # ----------------------------
 # Main loop
 # ----------------------------
-def run_sim(patient: PatientModel, n_trials=250, seed=7):
+def run_sim(patient: PatientModel, n_trials=10000, seed=7):
     rng = np.random.default_rng(seed)
 
     # Online estimates (speed model)
@@ -168,7 +165,7 @@ def run_sim(patient: PatientModel, n_trials=250, seed=7):
     sigma_v = 0.1        # initial uncertainty in effective speed
 
     # objective targets
-    p_star = 0.65         # desired hit probability
+    p_star = 0.60         # desired hit probability
     p_min = 0.10          # safety: don't choose near-impossible tasks
 
     counts_5x5 = np.zeros((5, 5), dtype=int)
@@ -180,19 +177,30 @@ def run_sim(patient: PatientModel, n_trials=250, seed=7):
     hist = {
         "d": [], "t": [], "v_req": [], "p_pred": [],
         "hit": [], "time_ratio": [], "dist_ratio": [],
-        "v_hat": [], "sigma_v": [], "score": []
+        "v_hat": [], "sigma_v": [], "score": [], "direction": []
     }
 
     for k in range(n_trials):
-        # choose best candidate on lattice
+        # Thompson sample direction and pick closest to 0.7
+        dir_samples = rng.beta(patient.spatial_success_alpha,
+                               patient.spatial_success_beta)
+        direction = int(np.argmin(np.abs(dir_samples - 0.7)))
+        # randomly choose a direction
+        direction = rng.integers(0, N_DIRECTIONS)
+        p_dir = float(dir_samples[direction])
+
+        # choose best candidate on lattice (for chosen direction)
         best = None
         best_score = -1e18
         best_p = None
 
-        for (d, t) in CANDIDATES:
+        for (d, t, cand_dir) in CANDIDATES:
+            if int(cand_dir) != direction:
+                continue
             sc, p = score_candidate(
                 d, t,
                 v_hat=v_hat, sigma_v=sigma_v,
+                p_dir=p_dir,
                 p_star=p_star,
                 counts_5x5=counts_5x5,
                 d_prev=d_prev, t_prev=t_prev,
@@ -215,9 +223,14 @@ def run_sim(patient: PatientModel, n_trials=250, seed=7):
         # run the trial using your simulator
         lvl = distance_level_from_patient_bins(patient, d_sys)
         outcome = patient.sample_trial(t_sys=t_sys, d_sys=d_sys,
-                                       distance_level=lvl, previous_hit=previous_hit)
+                                       distance_level=lvl, previous_hit=previous_hit,
+                                       direction_bin=direction)
         hit = bool(outcome["hit"])
         previous_hit = hit
+        if hit:
+            patient.spatial_success_alpha[direction] += 1.0
+        else:
+            patient.spatial_success_beta[direction] += 1.0
 
         # online learning update: separate speed tracking for hits vs misses
         # calculate v_obs = d_patient / t_patient from outcome
@@ -249,7 +262,8 @@ def run_sim(patient: PatientModel, n_trials=250, seed=7):
         hist["v_hat"].append(v_hat)
         hist["sigma_v"].append(sigma_v)
         hist["score"].append(best_score)
+        hist["direction"].append(direction)
 
         d_prev, t_prev = d_sys, t_sys
 
-    return hist, counts_5x5
+    return hist, counts_5x5, patient

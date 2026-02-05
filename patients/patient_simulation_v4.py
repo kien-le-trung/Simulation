@@ -28,8 +28,8 @@ class PatientModel:
         self,
         # TIME / DISTANCE MODEL
         d_levels=np.linspace(0.1, 1.0, 10),
-        k_d0_per_sec=0.08,
-        k_d_decay=0.05,
+        k_d0_per_sec=0.15,
+        k_d_decay=0,
         sigma_t=0.15,
         sigma_d=0.02,
         seed=7,
@@ -38,7 +38,9 @@ class PatientModel:
         v_sigma_growth=0.02,   # 1/s  (sigma increases with t_sys)
         # REACTION TIME MODEL
         r_base=0.25,          # seconds (reaction/latency baseline)
-        r_sigma=0.06          # seconds
+        r_sigma=0.06,          # seconds
+        # SPATIAL DIRECTION MODEL
+        spatial_strength_map=None
     ):
         # Keep the structure/attributes similar to the old model
         self.d_levels = np.array(d_levels, dtype=float)
@@ -54,6 +56,23 @@ class PatientModel:
         self.v_sigma_growth = float(v_sigma_growth)
         self.r_base = float(r_base)
         self.r_sigma = float(r_sigma)
+
+        # 8-bin (2 elevation x 4 azimuth) strength map for front hemisphere.
+        # Azimuth bins (left->right): [left, front_left, front_right, right]
+        # Elevation bins (low->high): [lower, upper]
+        # Values are multiplicative factors on velocity; right hand = harder left.
+        # Indexing: idx = elevation * 4 + azimuth
+        if spatial_strength_map is None:
+            self.spatial_strength_map = np.array(
+                [0.4, 0.6, 0.7, 0.8,
+                 0.4, 0.6, 1.0, 1.0],
+                dtype=float,
+            )
+        else:
+            self.spatial_strength_map = np.array(spatial_strength_map, dtype=float)
+        # Per-direction Beta(1,1) priors for success probability.
+        self.spatial_success_alpha = np.ones(8, dtype=float)
+        self.spatial_success_beta = np.ones(8, dtype=float)
 
         # derive time taken to reach each d_level at mean speed
         self.d_means = self.d_levels
@@ -71,7 +90,15 @@ class PatientModel:
         """Speed variability increases with time via a simple exponential."""
         return self.v_sigma0 * np.exp(self.v_sigma_growth * d_sys)
 
-    def sample_trial(self, *, t_sys: float, d_sys: float, distance_level: int, previous_hit: bool = True):
+    def sample_trial(
+        self,
+        *,
+        t_sys: float,
+        d_sys: float,
+        distance_level: int,
+        previous_hit: bool = True,
+        direction_bin: int | None = None,
+    ):
         """
         One-trial simulation.
 
@@ -96,6 +123,9 @@ class PatientModel:
 
         # ---- 2) sample speed v ~ Normal(mean=0.10, sd=...) ----
         v_mean = self._mean_speed(d_sys)
+        if direction_bin is not None:
+            idx = int(np.clip(direction_bin, 0, 7))
+            v_mean *= float(self.spatial_strength_map[idx])
         v_sigma = self._speed_sigma(d_sys)
         v = float(self.rng.normal(loc=v_mean, scale=v_sigma))
         # Truncate to strictly positive to avoid division issues
@@ -129,36 +159,3 @@ class PatientModel:
             "time_ratio": float(time_ratio),
             "dist_ratio": float(dist_ratio),
         }
-
-    def plot_v_t(
-        self,
-        t_min=None,
-        t_max=None,
-        d_min=0.0,
-        d_max=1.0,
-        t_steps=160,
-        d_steps=160,
-        n_samples=200,
-        seed=0,
-        stat="mean",
-    ):
-        import matplotlib.pyplot as plt
-
-        if t_min is None:
-            t_min = float(np.min(self.t_levels))
-        if t_max is None:
-            t_max = float(np.max(self.t_levels))
-
-        t_grid = np.linspace(t_min, t_max, int(t_steps))
-        d_grid = self.k_d0_per_sec * np.exp(-self.k_d_decay * t_grid) * t_grid
-        v_mean = self._mean_speed(d_grid)
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-        ax.plot(t_grid, v_mean, linewidth=2.0)
-        ax.set_title("v_mean vs t_sys")
-        ax.set_xlabel("t_sys")
-        ax.set_ylabel("v_mean (m/s)")
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-
-        return fig, ax

@@ -11,19 +11,19 @@ BASE_DIR = Path(__file__).resolve().parent
 PATIENT_PROFILES = {
     "overall_weak" : {
         "k_d0_per_sec": 0.10,
-        "k_d_decay": 1,
+        "k_d_decay": 0,
         "v_sigma0": 0.04,
         "v_sigma_growth": 0.03
     },
     "overall_medium" : {
         "k_d0_per_sec": 0.15,
-        "k_d_decay": 1,
+        "k_d_decay": 10,
         "v_sigma0": 0.04,
         "v_sigma_growth": 0.03
     },
     "overall_strong" : {
         "k_d0_per_sec": 0.25,
-        "k_d_decay": 1,
+        "k_d_decay": 0,
         "v_sigma0": 0.04,
         "v_sigma_growth": 0.03
     },
@@ -35,7 +35,7 @@ PATIENT_PROFILES = {
     },
     "lowspeed_highrom" : {
         "k_d0_per_sec": 0.10,
-        "k_d_decay": 0.3,
+        "k_d_decay": 0,
         "v_sigma0": 0.04,
         "v_sigma_growth": 0.02
     }
@@ -56,8 +56,8 @@ def _load_module_from_path(module_name, module_path):
 
 
 def _load_patient_model():
-    module_path = BASE_DIR / "patients" / "patient_simulation_v3.py"
-    module = _load_module_from_path("patients.patient_simulation_v3", module_path)
+    module_path = BASE_DIR / "patients" / "patient_simulation_v4.py"
+    module = _load_module_from_path("patients.patient_simulation_v4", module_path)
     return module.PatientModel
 
 
@@ -253,22 +253,9 @@ def run_algorithm(algorithm_name, *args, patient_profile=None, **kwargs):
 # plt.show()
 
 if __name__ == "__main__":
-    for profile in PATIENT_PROFILES.keys():
-        plot_phit_and_ideal_by_profile(profile)
-        plt.show()
-    # patient_profile = "overall_weak"
-
-    # _, _, phit_true, ideal_dist = plot_phit_and_ideal_by_profile(patient_profile)
-
-    # for algorithm in ALGORITHMS:
-    #     print(f"Running algorithm: {algorithm}")   
-    #     logs, counts = run_algorithm(algorithm_name=algorithm,
-    #                                 patient_profile=patient_profile,)
-    #     plot_heatmap = _load_visualization_module().plot_heatmap
-    #     plot_heatmap(counts,
-    #                  title=f"Counts heatmap for {algorithm} - {patient_profile}",
-    #                  xlabels=["shortest", "short", "medium", "long", "longest"],
-    #                  ylabels=["closest", "close", "medium", "far", "farthest"])
-    #     plt.show()
-    #     total_error = np.sum(np.abs(ideal_dist - counts))
-    #     print(f"Total error for {algorithm}, patient {patient_profile}: {total_error}")
+    patient_profile = "overall_weak"
+    algorithm = "operations_research_3var"
+    print(f"Running algorithm: {algorithm} (patient={patient_profile})")
+    logs, counts, patient = run_algorithm(algorithm_name=algorithm, patient_profile=patient_profile)
+    p_hit_tensor = _load_visualization_module().phit_tensor_from_hist(logs)
+    _load_visualization_module().plot_phit_d_dir(p_hit_tensor)

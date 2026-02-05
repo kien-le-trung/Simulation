@@ -68,8 +68,8 @@ GRADE_UPDATES = {
 
 @dataclass
 class AngleBins:
-    n_az: int = 9
-    n_el: int = 5
+    n_az: int = 4
+    n_el: int = 2
     # Safe "cone" in front of patient:
     # azimuth: left/right (radians), elevation: up/down (radians)
     az_min: float = -math.radians(40.0)
