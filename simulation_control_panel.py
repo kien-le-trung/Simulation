@@ -253,22 +253,30 @@ def run_algorithm(algorithm_name, *args, patient_profile=None, **kwargs):
 # plt.show()
 
 if __name__ == "__main__":
+    assets_dir = BASE_DIR / "Assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    viz = _load_visualization_module()
+
     for profile in PATIENT_PROFILES.keys():
-        plot_phit_and_ideal_by_profile(profile)
-        plt.show()
-    # patient_profile = "overall_weak"
+        fig, axes, phit_true, ideal_dist = plot_phit_and_ideal_by_profile(profile)
+        fig.savefig(assets_dir / f"{profile}_phit_ideal.png", dpi=150)
+        plt.close(fig)
 
-    # _, _, phit_true, ideal_dist = plot_phit_and_ideal_by_profile(patient_profile)
+        for algorithm in ALGORITHMS:
+            print(f"Running algorithm: {algorithm} (patient={profile})")
+            result = run_algorithm(
+                algorithm_name=algorithm,
+                patient_profile=profile,
+            )
+            if not isinstance(result, tuple) or len(result) < 2:
+                raise ValueError(f"Unexpected result from {algorithm}: {type(result)}")
+            logs, counts = result[0], result[1]
 
-    # for algorithm in ALGORITHMS:
-    #     print(f"Running algorithm: {algorithm}")   
-    #     logs, counts = run_algorithm(algorithm_name=algorithm,
-    #                                 patient_profile=patient_profile,)
-    #     plot_heatmap = _load_visualization_module().plot_heatmap
-    #     plot_heatmap(counts,
-    #                  title=f"Counts heatmap for {algorithm} - {patient_profile}",
-    #                  xlabels=["shortest", "short", "medium", "long", "longest"],
-    #                  ylabels=["closest", "close", "medium", "far", "farthest"])
-    #     plt.show()
-    #     total_error = np.sum(np.abs(ideal_dist - counts))
-    #     print(f"Total error for {algorithm}, patient {patient_profile}: {total_error}")
+            viz.plot_heatmap(
+                counts,
+                title=f"Counts heatmap for {algorithm} - {profile}",
+                xlabels=["shortest", "short", "medium", "long", "longest"],
+                ylabels=["closest", "close", "medium", "far", "farthest"],
+                save_path=assets_dir / f"{profile}_{algorithm}_counts_heatmap.png",
+                show=False,
+            )

@@ -5,13 +5,33 @@ import numpy as np
 xlabels = ["shortest", "short", "medium", "long", "longest"]  # time bins
 ylabels = ["closest", "close", "medium", "far", "farthest"]   # distance bins
 N_DIRECTIONS = 8
+DIR_INDEX_TO_ANGLE = {
+    0: 0,
+    1: 30,
+    2: 45,
+    3: 60,
+    4: 90,
+    5: 120,
+    6: 135,
+    7: 150,
+}
 
-def plot_heatmap(mat, title, xlabels, ylabels, annotate=True):
-    plt.figure()
-    plt.imshow(mat, aspect="auto")
-    plt.title(title)
-    plt.xticks(range(len(xlabels)), xlabels)
-    plt.yticks(range(len(ylabels)), ylabels)
+
+def _finalize_figure(fig, save_path=None, show=True):
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+def plot_heatmap(mat, title, xlabels, ylabels, annotate=True, save_path=None, show=True):
+    fig, ax = plt.subplots()
+    ax.imshow(mat, aspect="auto")
+    ax.set_title(title)
+    ax.set_xticks(range(len(xlabels)))
+    ax.set_xticklabels(xlabels)
+    ax.set_yticks(range(len(ylabels)))
+    ax.set_yticklabels(ylabels)
     if annotate:
         for i in range(mat.shape[0]):
             for j in range(mat.shape[1]):
@@ -19,10 +39,10 @@ def plot_heatmap(mat, title, xlabels, ylabels, annotate=True):
                     txt = str(mat[i, j])
                 else:
                     txt = f"{mat[i, j]:.2f}"
-                plt.text(j, i, txt, ha="center", va="center", fontsize=8)
-    plt.colorbar()
-    plt.tight_layout()
-    plt.show()
+                ax.text(j, i, txt, ha="center", va="center", fontsize=8)
+    fig.colorbar(ax.images[0], ax=ax)
+    fig.tight_layout()
+    _finalize_figure(fig, save_path=save_path, show=show)
 
 def phit_tensor_from_hist(
     hist,
@@ -62,7 +82,7 @@ def phit_tensor_from_hist(
     return phit
 
 
-def plot_phit_d_dir(phit_tensor, t_idx=None, reduce="mean"):
+def plot_phit_d_dir(phit_tensor, t_idx=None, reduce="mean", save_path=None, show=True):
     if t_idx is None:
         if reduce == "mean":
             mat = np.mean(phit_tensor, axis=1)
@@ -78,19 +98,19 @@ def plot_phit_d_dir(phit_tensor, t_idx=None, reduce="mean"):
         mat = phit_tensor[:, j, :]
         title = f"P(hit) vs (d,dir), t_idx={j}"
 
-    plt.figure()
-    plt.imshow(mat, aspect="auto")
-    plt.title(title)
-    plt.xticks(range(N_DIRECTIONS), [f"dir{d}" for d in range(N_DIRECTIONS)])
-    plt.yticks(range(5), ylabels)
+    fig, ax = plt.subplots()
+    ax.imshow(mat, aspect="auto")
+    ax.set_title(title)
+    ax.set_xticks(range(N_DIRECTIONS))
+    ax.set_xticklabels([f"{DIR_INDEX_TO_ANGLE.get(d, d)} deg" for d in range(N_DIRECTIONS)])
+    ax.set_yticks(range(5))
+    ax.set_yticklabels(ylabels)
     for i in range(mat.shape[0]):
         for j in range(mat.shape[1]):
-            plt.text(j, i, f"{mat[i, j]:.2f}", ha="center", va="center", fontsize=8)
-    plt.colorbar()
-    plt.tight_layout()
-    plt.show()
-
-
+            ax.text(j, i, f"{mat[i, j]:.2f}", ha="center", va="center", fontsize=8)
+    fig.colorbar(ax.images[0], ax=ax)
+    fig.tight_layout()
+    _finalize_figure(fig, save_path=save_path, show=show)
 def average_time(hist):
     times = np.asarray(hist.get("t", []), dtype=float)
     if times.size == 0:
@@ -109,7 +129,8 @@ def average_direction(hist):
     directions = np.asarray(hist.get("direction", []), dtype=float)
     if directions.size == 0:
         return float("nan")
-    return float(np.mean(directions)), float(np.std(directions))
+    angles = np.array([DIR_INDEX_TO_ANGLE.get(int(d), d) for d in directions], dtype=float)
+    return float(np.mean(angles)), float(np.std(angles))
 
 
 def rolling_hitting_rate(hist, window=50, min_periods=1):
@@ -149,7 +170,14 @@ def rolling_hit_rates(hist, window=50, min_periods=1):
     return rolling, overall
 
 
-def plot_rolling_hit_rate(hit_series_by_algorithm, window=50, min_periods=1, title="Rolling Hit Rate"):
+def plot_rolling_hit_rate(
+    hit_series_by_algorithm,
+    window=50,
+    min_periods=1,
+    title="Rolling Hit Rate",
+    save_path=None,
+    show=True,
+):
     """
     Plot rolling hit rates for multiple algorithms on the same graph.
     Input: dict of {"algorithm_name": hits_list_or_array}
@@ -157,29 +185,27 @@ def plot_rolling_hit_rate(hit_series_by_algorithm, window=50, min_periods=1, tit
     if not isinstance(hit_series_by_algorithm, dict) or len(hit_series_by_algorithm) == 0:
         raise ValueError("hit_series_by_algorithm must be a non-empty dict")
 
-    plt.figure()
+    fig, ax = plt.subplots()
     plotted_any = False
     for name, hits in hit_series_by_algorithm.items():
         hist = {"hit": hits}
         rolling = rolling_hitting_rate(hist, window=window, min_periods=min_periods)
         if rolling.size == 0:
             continue
-        plt.plot(rolling, linewidth=2.0, label=str(name))
+        ax.plot(rolling, linewidth=2.0, label=str(name))
         plotted_any = True
 
     if not plotted_any:
         raise ValueError("No non-empty hit series to plot")
 
-    plt.title(title)
-    plt.xlabel("Trial")
-    plt.ylabel("Rolling hit rate")
-    plt.ylim(0.0, 1.0)
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
-
+    ax.set_title(title)
+    ax.set_xlabel("Trial")
+    ax.set_ylabel("Rolling hit rate")
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    _finalize_figure(fig, save_path=save_path, show=show)
 def plot_caterpillar_means(
     algorithm_names,
     means_time,
@@ -189,6 +215,8 @@ def plot_caterpillar_means(
     std_dist,
     std_dir,
     title="Caterpillar Plot: Mean and Std",
+    save_path=None,
+    show=True,
 ):
     """
     Create a caterpillar plot for mean time, distance, and direction with std whiskers.
@@ -221,4 +249,4 @@ def plot_caterpillar_means(
     axes[0].set_yticklabels(algs)
     fig.suptitle(title)
     fig.tight_layout()
-    plt.show()
+    _finalize_figure(fig, save_path=save_path, show=show)

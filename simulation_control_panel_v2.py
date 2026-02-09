@@ -253,60 +253,85 @@ def run_algorithm(algorithm_name, *args, patient_profile=None, **kwargs):
 # plt.show()
 
 if __name__ == "__main__":
-    patient_profile = "overall_weak"
+    assets_dir = BASE_DIR / "Assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
     viz = _load_visualization_module()
+
     algorithms = [
         "control_system_3var",
         "operations_research_3var",
         "staircasing_3var",
         "logistic_online_3var",
-        "QUEST_3var"
     ]
 
-    means_time = []
-    means_dist = []
-    means_dir = []
-    std_time = []
-    std_dist = []
-    std_dir = []
-    hits_by_algorithm = {}
+    for patient_profile in PATIENT_PROFILES.keys():
+        print(f"=== Patient profile: {patient_profile} ===")
 
-    for algorithm in algorithms:
-        print(f"Running algorithm: {algorithm} (patient={patient_profile})")
-        logs, counts, patient = run_algorithm(
-            algorithm_name=algorithm,
-            patient_profile=patient_profile,
-            n_trials=200,
+        fig, axes, phit_true, ideal_dist = plot_phit_and_ideal_by_profile(patient_profile)
+        fig.savefig(assets_dir / f"{patient_profile}_phit_ideal.png", dpi=150)
+        plt.close(fig)
+
+        means_time = []
+        means_dist = []
+        means_dir = []
+        std_time = []
+        std_dist = []
+        std_dir = []
+        hits_by_algorithm = {}
+
+        for algorithm in algorithms:
+            print(f"Running algorithm: {algorithm} (patient={patient_profile})")
+            result = run_algorithm(
+                algorithm_name=algorithm,
+                patient_profile=patient_profile,
+                n_trials=200,
+            )
+            if not isinstance(result, tuple) or len(result) < 2:
+                raise ValueError(f"Unexpected result from {algorithm}: {type(result)}")
+            logs, counts = result[0], result[1]
+
+            avg_time, sd_time = viz.average_time(logs)
+            avg_dist, sd_dist = viz.average_distance(logs)
+            avg_dir, sd_dir = viz.average_direction(logs)
+
+            means_time.append(avg_time)
+            means_dist.append(avg_dist)
+            means_dir.append(avg_dir)
+            std_time.append(sd_time)
+            std_dist.append(sd_dist)
+            std_dir.append(sd_dir)
+            hits_by_algorithm[algorithm] = logs.get("hit", [])
+
+            print(f"  Mean time: {avg_time:.4f} +/- {sd_time:.4f}")
+            print(f"  Mean dist: {avg_dist:.4f} +/- {sd_dist:.4f}")
+            print(f"  Mean dir:  {avg_dir:.4f} +/- {sd_dir:.4f}")
+
+            viz.plot_heatmap(
+                counts,
+                title=f"Counts heatmap for {algorithm} - {patient_profile}",
+                xlabels=["shortest", "short", "medium", "long", "longest"],
+                ylabels=["closest", "close", "medium", "far", "farthest"],
+                save_path=assets_dir / f"{patient_profile}_{algorithm}_counts_heatmap.png",
+                show=False,
+            )
+
+        viz.plot_caterpillar_means(
+            algorithm_names=algorithms,
+            means_time=means_time,
+            means_dist=means_dist,
+            means_dir=means_dir,
+            std_time=std_time,
+            std_dist=std_dist,
+            std_dir=std_dir,
+            title=f"Mean/SD by Algorithm - {patient_profile}",
+            save_path=assets_dir / f"{patient_profile}_caterpillar.png",
+            show=False,
         )
-        avg_time, sd_time = viz.average_time(logs)
-        avg_dist, sd_dist = viz.average_distance(logs)
-        avg_dir, sd_dir = viz.average_direction(logs)
-
-        means_time.append(avg_time)
-        means_dist.append(avg_dist)
-        means_dir.append(avg_dir)
-        std_time.append(sd_time)
-        std_dist.append(sd_dist)
-        std_dir.append(sd_dir)
-        hits_by_algorithm[algorithm] = logs.get("hit", [])
-
-        print(f"  Mean time: {avg_time:.4f} +/- {sd_time:.4f}")
-        print(f"  Mean dist: {avg_dist:.4f} +/- {sd_dist:.4f}")
-        print(f"  Mean dir:  {avg_dir:.4f} +/- {sd_dir:.4f}")
-
-    viz.plot_caterpillar_means(
-        algorithm_names=algorithms,
-        means_time=means_time,
-        means_dist=means_dist,
-        means_dir=means_dir,
-        std_time=std_time,
-        std_dist=std_dist,
-        std_dir=std_dir,
-        title="Mean/SD by Algorithm",
-    )
-    viz.plot_rolling_hit_rate(
-        hits_by_algorithm,
-        window=50,
-        min_periods=1,
-        title="Rolling Hit Rate by Algorithm",
-    )
+        viz.plot_rolling_hit_rate(
+            hits_by_algorithm,
+            window=50,
+            min_periods=1,
+            title=f"Rolling Hit Rate by Algorithm - {patient_profile}",
+            save_path=assets_dir / f"{patient_profile}_rolling_hit_rate.png",
+            show=False,
+        )

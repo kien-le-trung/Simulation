@@ -64,8 +64,7 @@ class PatientModel:
         # Indexing: idx = elevation * 4 + azimuth
         if spatial_strength_map is None:
             self.spatial_strength_map = np.array(
-                [0.4, 0.6, 0.7, 0.8,
-                 0.4, 0.6, 1.0, 1.0],
+                [0.4, 0.5, 0.5, 0.6, 0.8, 0.9, 1.0, 1.0],
                 dtype=float,
             )
         else:

@@ -162,18 +162,18 @@ def run_quest_plus_dt(
     if d_grid is None:
         d_grid = np.round(np.arange(D_MIN, D_MAX + 0.01, 0.1), 4)   # 15 values
     if t_grid is None:
-        t_grid = np.round(np.arange(T_MIN, T_MAX + 0.01, 1), 4)   # 25 values
+        t_grid = np.round(np.arange(T_MIN, T_MAX + 0.01, 0.5), 4)   # 25 values
     if dir_grid is None:
         dir_grid = np.arange(DIR_MIN, DIR_MAX + 1, dtype=int)
 
     if b0_grid is None:
-        b0_grid = np.round(np.linspace(-6.0, 6.0, 17), 4)   # intercept
+        b0_grid = np.round(np.linspace(-6.0, 6.0, 9), 4)    # intercept
     if b1_grid is None:
-        b1_grid = np.round(np.linspace(-10.0, 10.0, 21), 4) # weight on d
+        b1_grid = np.round(np.linspace(-8.0, 8.0, 9), 4)    # weight on d
     if b2_grid is None:
-        b2_grid = np.round(np.linspace(-2.0, 2.0, 17), 4)   # weight on t
+        b2_grid = np.round(np.linspace(-2.0, 2.0, 7), 4)    # weight on t
     if b3_grid is None:
-        b3_grid = np.round(np.linspace(-2.0, 2.0, 9), 4)    # weight on dir
+        b3_grid = np.round(np.linspace(-2.0, 2.0, 5), 4)    # weight on dir
 
     # parameter lattice
     B0, B1, B2, B3 = cartesian_params(b0_grid, b1_grid, b2_grid, b3_grid)   # broadcastable
