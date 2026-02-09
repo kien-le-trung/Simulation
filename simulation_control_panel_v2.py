@@ -254,8 +254,59 @@ def run_algorithm(algorithm_name, *args, patient_profile=None, **kwargs):
 
 if __name__ == "__main__":
     patient_profile = "overall_weak"
-    algorithm = "operations_research_3var"
-    print(f"Running algorithm: {algorithm} (patient={patient_profile})")
-    logs, counts, patient = run_algorithm(algorithm_name=algorithm, patient_profile=patient_profile)
-    p_hit_tensor = _load_visualization_module().phit_tensor_from_hist(logs)
-    _load_visualization_module().plot_phit_d_dir(p_hit_tensor)
+    viz = _load_visualization_module()
+    algorithms = [
+        "control_system_3var",
+        "operations_research_3var",
+        "staircasing_3var",
+        "logistic_online_3var",
+        "QUEST_3var"
+    ]
+
+    means_time = []
+    means_dist = []
+    means_dir = []
+    std_time = []
+    std_dist = []
+    std_dir = []
+    hits_by_algorithm = {}
+
+    for algorithm in algorithms:
+        print(f"Running algorithm: {algorithm} (patient={patient_profile})")
+        logs, counts, patient = run_algorithm(
+            algorithm_name=algorithm,
+            patient_profile=patient_profile,
+            n_trials=200,
+        )
+        avg_time, sd_time = viz.average_time(logs)
+        avg_dist, sd_dist = viz.average_distance(logs)
+        avg_dir, sd_dir = viz.average_direction(logs)
+
+        means_time.append(avg_time)
+        means_dist.append(avg_dist)
+        means_dir.append(avg_dir)
+        std_time.append(sd_time)
+        std_dist.append(sd_dist)
+        std_dir.append(sd_dir)
+        hits_by_algorithm[algorithm] = logs.get("hit", [])
+
+        print(f"  Mean time: {avg_time:.4f} +/- {sd_time:.4f}")
+        print(f"  Mean dist: {avg_dist:.4f} +/- {sd_dist:.4f}")
+        print(f"  Mean dir:  {avg_dir:.4f} +/- {sd_dir:.4f}")
+
+    viz.plot_caterpillar_means(
+        algorithm_names=algorithms,
+        means_time=means_time,
+        means_dist=means_dist,
+        means_dir=means_dir,
+        std_time=std_time,
+        std_dist=std_dist,
+        std_dir=std_dir,
+        title="Mean/SD by Algorithm",
+    )
+    viz.plot_rolling_hit_rate(
+        hits_by_algorithm,
+        window=50,
+        min_periods=1,
+        title="Rolling Hit Rate by Algorithm",
+    )

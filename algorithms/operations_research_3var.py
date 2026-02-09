@@ -165,7 +165,7 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
     sigma_v = 0.1        # initial uncertainty in effective speed
 
     # objective targets
-    p_star = 0.60         # desired hit probability
+    p_star = 0.70         # desired hit probability
     p_min = 0.10          # safety: don't choose near-impossible tasks
 
     counts_5x5 = np.zeros((5, 5), dtype=int)
@@ -186,7 +186,7 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
                                patient.spatial_success_beta)
         direction = int(np.argmin(np.abs(dir_samples - 0.7)))
         # randomly choose a direction
-        direction = rng.integers(0, N_DIRECTIONS)
+        # direction = rng.integers(0, N_DIRECTIONS)
         p_dir = float(dir_samples[direction])
 
         # choose best candidate on lattice (for chosen direction)

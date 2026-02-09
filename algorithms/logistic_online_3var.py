@@ -1,9 +1,8 @@
 # rl_logreg_difficulty_index.py
-# rl_logreg_difficulty_index.py
 # Difficulty-index + logistic regression + RL-style updates to index weights.
 #
 # Requires: numpy, matplotlib
-# Uses your patient simulator: patient_simulation_v2.py  :contentReference[oaicite:0]{index=0}
+# Uses your patient simulator: patient_simulation_v4.py
 
 import importlib.util
 from pathlib import Path
@@ -20,8 +19,8 @@ def _load_module_from_path(module_name, module_path):
     return module
 
 
-PATIENT_SIM_PATH = BASE_DIR / "patients" / "patient_simulation_v3.py"
-patient_mod = _load_module_from_path("patients.patient_simulation_v3", PATIENT_SIM_PATH)
+PATIENT_SIM_PATH = BASE_DIR / "patients" / "patient_simulation_v4.py"
+patient_mod = _load_module_from_path("patients.patient_simulation_v4", PATIENT_SIM_PATH)
 PatientModel = patient_mod.PatientModel
 
 # -----------------------------
@@ -85,12 +84,18 @@ def hard_time_feature(t):
 
 INDEX_W_D = 1.0
 INDEX_W_T = 1.0
+INDEX_W_DIR = 1.0
+N_DIRECTIONS = 8
+
+
+def normalize_dir(direction):
+    return float(direction) / max(1.0, (N_DIRECTIONS - 1))
 
 
 class DifficultyIndexLogReg:
     """
     p_hat = sigmoid(beta0 + beta1 * I)
-    I = INDEX_W_D * d_norm + INDEX_W_T * hard_time
+    I = INDEX_W_D * d_norm + INDEX_W_T * hard_time + INDEX_W_DIR * dir_norm
 
     beta updated by supervised log-loss gradient (hit/miss).
     """
@@ -109,6 +114,7 @@ class DifficultyIndexLogReg:
 
         self.w_d = float(INDEX_W_D)
         self.w_t = float(INDEX_W_T)
+        self.w_dir = float(INDEX_W_DIR)
 
         self.lr_beta = float(lr_beta)
 
@@ -117,32 +123,24 @@ class DifficultyIndexLogReg:
 
         self._seen = set()  # track if we've seen both classes for stable behavior
 
-    def index(self, d, t):
+    def index(self, d, t, direction):
         dn = normalize_d(d)
         ht = hard_time_feature(t)
-        return self.w_d * dn + self.w_t * ht, dn, ht
+        dr = normalize_dir(direction)
+        return self.w_d * dn + self.w_t * ht + self.w_dir * dr, dn, ht, dr
 
-    def predict_p(self, d, t):
+    def predict_p(self, d, t, direction):
         # before seeing both classes, be maximally uncertain
         if len(self._seen) < 2:
             return 0.5
-        I, _, _ = self.index(d, t)
+        I, _, _, _ = self.index(d, t, direction)
         return float(sigmoid(self.beta0 + self.beta1 * I))
 
-    def uncertainty(self, d, t):
-        p = self.predict_p(d, t)
+    def uncertainty(self, d, t, direction):
+        p = self.predict_p(d, t, direction)
         return 1.0 - 2.0 * abs(p - 0.5)  # in [0,1]
 
-    def reward(self, hit, d, t):
-        # reward uses negative log-loss on the intended (d,t)
-        p_hat = self.predict_p(d, t)
-        y = 1.0 if hit else 0.0
-        eps = 1e-12
-        p_hat = float(np.clip(p_hat, eps, 1.0 - eps))
-        log_loss = -(y * np.log(p_hat) + (1.0 - y) * np.log(1.0 - p_hat))
-        return float(-log_loss)
-
-    def update(self, hit, d_exec, t_exec, d_intended, t_intended):
+    def update(self, hit, d_exec, t_exec, dir_exec, d_intended, t_intended, dir_intended):
         """
         Supervised update for beta from executed (d_exec, t_exec) and hit label.
         """
@@ -150,7 +148,7 @@ class DifficultyIndexLogReg:
         self._seen.add(int(y))
 
         # logistic regression update on executed stimulus
-        I_exec, _, _ = self.index(d_exec, t_exec)
+        I_exec, _, _, _ = self.index(d_exec, t_exec, dir_exec)
         p_exec = sigmoid(self.beta0 + self.beta1 * I_exec)
 
         # gradient of log-loss: (p - y)
@@ -196,14 +194,14 @@ def run_controller(
         "a_i": [], "a_j": [],
         "d": [], "t": [],
         "d_sys": [], "t_sys": [],
+        "direction": [],
         "p_pred_intended": [],
         "p_pred_exec": [],
         "uncert": [],
         "hit": [],
-        "reward": [],
         "rolling_hit": [],
         "beta0": [], "beta1": [],
-        "w_d": [], "w_t": [],
+        "w_d": [], "w_t": [], "w_dir": [],
         "index_exec": [],
     }
 
@@ -212,13 +210,16 @@ def run_controller(
     hit_list = []
 
     for k in range(n_trials):
+        dir_samples = rng.beta(patient.spatial_success_alpha,
+                               patient.spatial_success_beta)
+        direction = int(np.argmin(np.abs(dir_samples - p_star)))
         # compute predicted p and uncertainty for all 25 actions (intended grid points)
         p_hat = np.zeros((5, 5), dtype=float)
         uncert = np.zeros((5, 5), dtype=float)
         for i in range(5):
             for j in range(5):
                 d, t = float(D_LEVELS[i]), float(T_LEVELS[j])
-                p_hat[i, j] = model.predict_p(d, t)
+                p_hat[i, j] = model.predict_p(d, t, direction)
                 uncert[i, j] = 1.0 - 2.0 * abs(p_hat[i, j] - 0.5)
 
         # choose action
@@ -259,17 +260,26 @@ def run_controller(
 
         # run patient trial
         lvl = distance_level_from_patient_bins(patient, d_sys)
-        out = patient.sample_trial(t_sys=t_sys, d_sys=d_sys, distance_level=lvl, previous_hit=prev_hit)
+        out = patient.sample_trial(
+            t_sys=t_sys,
+            d_sys=d_sys,
+            distance_level=lvl,
+            previous_hit=prev_hit,
+            direction_bin=direction,
+        )
         hit = bool(out["hit"])
         prev_hit = hit
-
-        # reward computed on intended (d,t) for stable shaping
-        r = model.reward(hit, d, t)
+        if hit:
+            patient.spatial_success_alpha[direction] += 1.0
+        else:
+            patient.spatial_success_beta[direction] += 1.0
 
         # update model (beta on executed, w on intended via shaped reward)
-        p_exec_before = model.predict_p(d_sys, t_sys)
-        p_int_before = model.predict_p(d, t)
-        p_exec_after, I_exec, p_int_after = model.update(hit, d_sys, t_sys, d, t)
+        p_exec_before = model.predict_p(d_sys, t_sys, direction)
+        p_int_before = model.predict_p(d, t, direction)
+        p_exec_after, I_exec, p_int_after = model.update(
+            hit, d_sys, t_sys, direction, d, t, direction
+        )
 
         counts[i, j] += 1
 
@@ -287,18 +297,19 @@ def run_controller(
         hist["t"].append(t)
         hist["d_sys"].append(d_sys)
         hist["t_sys"].append(t_sys)
+        hist["direction"].append(int(direction))
         hist["p_pred_intended"].append(float(p_int_before))
         hist["p_pred_exec"].append(float(p_exec_before))
         hist["uncert"].append(float(uncert[i, j]))
         hist["hit"].append(int(hit))
-        hist["reward"].append(float(r))
         hist["rolling_hit"].append(roll)
         hist["beta0"].append(float(model.beta0))
         hist["beta1"].append(float(model.beta1))
         hist["w_d"].append(float(model.w_d))
         hist["w_t"].append(float(model.w_t))
+        hist["w_dir"].append(float(model.w_dir))
         hist["index_exec"].append(float(I_exec))
 
-    return hist, counts
+    return hist, counts, patient
 
 
