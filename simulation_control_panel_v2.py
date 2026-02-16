@@ -9,36 +9,46 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # A simulation control panel for managing simulation parameters and execution.
 PATIENT_PROFILES = {
+    # Slow, limited range, high variability — e.g., elderly or post-injury
     "overall_weak" : {
-        "k_d0_per_sec": 0.10,
-        "k_d_decay": 0,
-        "v_sigma0": 0.04,
-        "v_sigma_growth": 0.03
+        "k_d0_per_sec": 0.12,
+        "k_d_decay": 3.0,
+        "v_sigma0": 0.06,
+        "v_sigma_growth": 0.04,
+        "spatial_strength_map": [0.3, 0.4, 0.4, 0.3, 0.5, 0.6, 0.6, 0.5],
     },
+    # Comfortable pace, moderate range — typical healthy adult
     "overall_medium" : {
-        "k_d0_per_sec": 0.15,
-        "k_d_decay": 10,
+        "k_d0_per_sec": 0.35,
+        "k_d_decay": 1.5,
         "v_sigma0": 0.04,
-        "v_sigma_growth": 0.03
+        "v_sigma_growth": 0.03,
+        "spatial_strength_map": [0.55, 0.65, 0.65, 0.55, 0.75, 0.85, 0.85, 0.75],
     },
+    # Fast, full range, low variability — athletic / young healthy
     "overall_strong" : {
-        "k_d0_per_sec": 0.25,
-        "k_d_decay": 0,
-        "v_sigma0": 0.04,
-        "v_sigma_growth": 0.03
+        "k_d0_per_sec": 0.65,
+        "k_d_decay": 0.3,
+        "v_sigma0": 0.03,
+        "v_sigma_growth": 0.01,
+        "spatial_strength_map": [0.7, 0.8, 0.85, 0.75, 0.85, 0.95, 1.0, 0.9],
     },
+    # Quick but range drops fast at distance/periphery — e.g., shoulder impairment
     "highspeed_lowrom" : {
-        "k_d0_per_sec": 0.45,
-        "k_d_decay": 4,
-        "v_sigma0": 0.04,
-        "v_sigma_growth": 0.05
+        "k_d0_per_sec": 0.55,
+        "k_d_decay": 4.0,
+        "v_sigma0": 0.05,
+        "v_sigma_growth": 0.05,
+        "spatial_strength_map": [0.2, 0.4, 0.4, 0.2, 0.5, 0.9, 0.9, 0.5],
     },
+    # Slow but can reach everything relatively evenly — e.g., deconditioned but mobile
     "lowspeed_highrom" : {
-        "k_d0_per_sec": 0.10,
-        "k_d_decay": 0,
+        "k_d0_per_sec": 0.15,
+        "k_d_decay": 0.3,
         "v_sigma0": 0.04,
-        "v_sigma_growth": 0.02
-    }
+        "v_sigma_growth": 0.02,
+        "spatial_strength_map": [0.6, 0.7, 0.7, 0.6, 0.8, 0.85, 0.9, 0.85],
+    },
 }
 
 ALGORITHMS = ["operations_research",
@@ -119,42 +129,6 @@ def _load_visualization_module():
     return _load_module_from_path("tests.visualization", module_path)
 
 
-def plot_v_mean_by_profile():
-    PatientModel = _load_patient_model()
-    fig, ax = plt.subplots(figsize=(8, 5))
-    for name, params in PATIENT_PROFILES.items():
-        model = PatientModel(**params)
-        d_vals = model.d_means
-        v_mean = model._mean_speed(d_vals)
-        ax.plot(d_vals, v_mean, label=name, linewidth=2.0)
-
-    ax.set_title("Mean speed against time")
-    ax.set_xlabel("Distance reached (m)")
-    ax.set_ylabel("Mean speed of the patient (m/s)")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-
-    return fig, ax
-
-
-def plot_d_by_profile():
-    PatientModel = _load_patient_model()
-    fig, ax = plt.subplots(figsize=(8, 5))
-    for name, params in PATIENT_PROFILES.items():
-        model = PatientModel(**params)
-        ax.plot(model.t_levels, model.d_means, label=name, linewidth=2.0)
-
-    ax.set_title("ROM against time")
-    ax.set_xlabel("Time given to patient (s)")
-    ax.set_ylabel("Patient's furthest reachable distance (m)")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-
-    return fig, ax
-
-
 def plot_phit_and_ideal_by_profile(
     profile_name,
     mc_per_cell=300,
@@ -189,7 +163,11 @@ def plot_phit_and_ideal_by_profile(
 
     phit_true = estimate_true_phit_matrix(
         patient_seed=patient_seed,
+        patient_speed=patient_params.get("k_d0_per_sec", 0.15),
         patient_speed_sd=patient_params.get("v_sigma0", 0.04),
+        k_d_decay=patient_params.get("k_d_decay", 0),
+        v_sigma_growth=patient_params.get("v_sigma_growth", 0.03),
+        spatial_strength_map=patient_params.get("spatial_strength_map", None),
         mc_per_cell=mc_per_cell,
     )
     ideal_dist = make_ideal_distribution(
@@ -255,7 +233,31 @@ def run_algorithm(algorithm_name, *args, patient_profile=None, **kwargs):
 if __name__ == "__main__":
     assets_dir = BASE_DIR / "Assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
+    patient_profiles_dir = assets_dir / "patient_profiles"
+    patient_profiles_dir.mkdir(parents=True, exist_ok=True)
     viz = _load_visualization_module()
+    PatientModel = _load_patient_model()
+
+    fig, _ = viz.plot_v_mean_by_profile(PATIENT_PROFILES, PatientModel)
+    fig.savefig(patient_profiles_dir / "patient_v_mean_by_profile.png", dpi=150)
+    plt.close(fig)
+
+    fig, _ = viz.plot_d_by_profile(PATIENT_PROFILES, PatientModel)
+    fig.savefig(patient_profiles_dir / "patient_rom_by_profile.png", dpi=150)
+    plt.close(fig)
+
+    default_patient = PatientModel()
+    time_xlim = (
+        float(0),
+        float(np.max(default_patient.t_levels)),
+    )
+    dist_xlim = (
+        float(0),
+        float(np.max(default_patient.d_levels)),
+    )
+    dir_angles = np.array(list(viz.DIR_INDEX_TO_ANGLE.values()), dtype=float)
+    dir_xlim = (float(np.min(dir_angles)), float(np.max(dir_angles)))
+    profile_caterpillar_stats = {}
 
     algorithms = [
         "control_system_3var",
@@ -315,18 +317,15 @@ if __name__ == "__main__":
                 show=False,
             )
 
-        viz.plot_caterpillar_means(
-            algorithm_names=algorithms,
-            means_time=means_time,
-            means_dist=means_dist,
-            means_dir=means_dir,
-            std_time=std_time,
-            std_dist=std_dist,
-            std_dir=std_dir,
-            title=f"Mean/SD by Algorithm - {patient_profile}",
-            save_path=assets_dir / f"{patient_profile}_caterpillar.png",
-            show=False,
-        )
+        profile_caterpillar_stats[patient_profile] = {
+            "algorithm_names": list(algorithms),
+            "means_time": list(means_time),
+            "std_time": list(std_time),
+            "means_dist": list(means_dist),
+            "std_dist": list(std_dist),
+            "means_dir": list(means_dir),
+            "std_dir": list(std_dir),
+        }
         viz.plot_rolling_hit_rate(
             hits_by_algorithm,
             window=50,
@@ -335,3 +334,14 @@ if __name__ == "__main__":
             save_path=assets_dir / f"{patient_profile}_rolling_hit_rate.png",
             show=False,
         )
+
+    viz.plot_caterpillar_means_by_profile(
+        profile_stats=profile_caterpillar_stats,
+        title="Mean/SD by Algorithm Across Patient Profiles",
+        time_xlim=time_xlim,
+        dist_xlim=dist_xlim,
+        dir_xlim=dir_xlim,
+        save_path=assets_dir / "all_profiles_caterpillar.png",
+        show=False,
+    )
+    

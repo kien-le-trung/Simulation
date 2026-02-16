@@ -24,6 +24,40 @@ def _finalize_figure(fig, save_path=None, show=True):
         plt.show()
     plt.close(fig)
 
+
+def plot_v_mean_by_profile(patient_profiles, PatientModel):
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for name, params in patient_profiles.items():
+        model = PatientModel(**params)
+        d_vals = model.d_means
+        v_mean = model._mean_speed(d_vals)
+        ax.plot(d_vals, v_mean, label=name, linewidth=2.0)
+
+    ax.set_title("Mean speed against time")
+    ax.set_xlabel("Distance reached (m)")
+    ax.set_ylabel("Mean speed of the patient (m/s)")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    return fig, ax
+
+
+def plot_d_by_profile(patient_profiles, PatientModel):
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for name, params in patient_profiles.items():
+        model = PatientModel(**params)
+        ax.plot(model.t_levels, model.d_means, label=name, linewidth=2.0)
+
+    ax.set_title("ROM against time")
+    ax.set_xlabel("Time given to patient (s)")
+    ax.set_ylabel("Patient's furthest reachable distance (m)")
+    ax.set_xlim(0, 20)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    return fig, ax
+
+
 def plot_heatmap(mat, title, xlabels, ylabels, annotate=True, save_path=None, show=True):
     fig, ax = plt.subplots()
     ax.imshow(mat, aspect="auto")
@@ -215,6 +249,9 @@ def plot_caterpillar_means(
     std_dist,
     std_dir,
     title="Caterpillar Plot: Mean and Std",
+    time_xlim=None,
+    dist_xlim=None,
+    dir_xlim=None,
     save_path=None,
     show=True,
 ):
@@ -238,15 +275,94 @@ def plot_caterpillar_means(
         ("Direction", means_dir, std_dir),
     ]
 
-    for ax, (label, means, stds) in zip(axes, panels):
+    xlims = [time_xlim, dist_xlim, dir_xlim]
+    for ax, (label, means, stds), xlim in zip(axes, panels, xlims):
         means = np.asarray(means, dtype=float)
         stds = np.asarray(stds, dtype=float)
         ax.errorbar(means, y, xerr=stds, fmt="o", capsize=3, linewidth=1.5)
         ax.set_title(label)
         ax.grid(True, axis="x", alpha=0.3)
+        if xlim is not None:
+            ax.set_xlim(*xlim)
 
     axes[0].set_yticks(y)
     axes[0].set_yticklabels(algs)
+    fig.suptitle(title)
+    fig.tight_layout()
+    _finalize_figure(fig, save_path=save_path, show=show)
+
+
+def plot_caterpillar_means_by_profile(
+    profile_stats,
+    title="Caterpillar Plot: Mean and Std by Profile",
+    time_xlim=None,
+    dist_xlim=None,
+    dir_xlim=None,
+    save_path=None,
+    show=True,
+):
+    """
+    Create one figure with a row per patient profile and 3 columns (time/dist/direction).
+
+    profile_stats format:
+      {
+        "profile_name": {
+          "algorithm_names": [...],
+          "means_time": [...], "std_time": [...],
+          "means_dist": [...], "std_dist": [...],
+          "means_dir": [...],  "std_dir": [...],
+        },
+        ...
+      }
+    """
+    if not isinstance(profile_stats, dict) or len(profile_stats) == 0:
+        raise ValueError("profile_stats must be a non-empty dict")
+
+    profile_names = list(profile_stats.keys())
+    n_profiles = len(profile_names)
+
+    fig, axes = plt.subplots(
+        n_profiles,
+        3,
+        figsize=(12, max(3.5, 2.6 * n_profiles)),
+        sharex="col",
+        squeeze=False,
+    )
+    xlims = [time_xlim, dist_xlim, dir_xlim]
+
+    for row_idx, profile_name in enumerate(profile_names):
+        stats = profile_stats[profile_name]
+        algorithm_names = stats["algorithm_names"]
+        n_algs = len(algorithm_names)
+        y = np.arange(n_algs)
+
+        panels = [
+            ("Time", stats["means_time"], stats["std_time"]),
+            ("Distance", stats["means_dist"], stats["std_dist"]),
+            ("Direction", stats["means_dir"], stats["std_dir"]),
+        ]
+
+        for col_idx, ((label, means, stds), xlim) in enumerate(zip(panels, xlims)):
+            ax = axes[row_idx, col_idx]
+            means = np.asarray(means, dtype=float)
+            stds = np.asarray(stds, dtype=float)
+            ax.errorbar(means, y, xerr=stds, fmt="o", capsize=3, linewidth=1.5)
+            ax.grid(True, axis="x", alpha=0.3)
+            if xlim is not None:
+                ax.set_xlim(*xlim)
+            if row_idx == 0:
+                ax.set_title(label)
+            if col_idx > 0:
+                ax.tick_params(axis="y", which="both", left=False, labelleft=False)
+
+        axes[row_idx, 0].set_yticks(y)
+        axes[row_idx, 0].set_yticklabels(algorithm_names)
+        axes[row_idx, 0].set_ylabel(profile_name)
+
+    axes[-1, 0].set_xlabel("Time (s)")
+    axes[-1, 1].set_xlabel("Distance (m)")
+    axes[-1, 2].set_xlabel("Direction (degrees)")
+
     fig.suptitle(title)
     fig.tight_layout()
     _finalize_figure(fig, save_path=save_path, show=show)

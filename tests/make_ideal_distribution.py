@@ -51,17 +51,28 @@ def distance_level_from_patient_bins(patient: PatientModel, d_sys: float) -> int
 # -----------------------------
 def estimate_true_phit_matrix(patient_seed=7,
                               patient_speed = 0.08,
-                              patient_speed_sd = 0.04, 
+                              patient_speed_sd = 0.04,
+                              k_d_decay = 0,
+                              v_sigma_growth = 0.03,
+                              spatial_strength_map = None,
                               mc_per_cell=300):
     rng = np.random.default_rng(123)
     phit = np.zeros((5, 5), dtype=float)
 
+    patient_kwargs = dict(
+        seed=patient_seed,
+        k_d0_per_sec=patient_speed,
+        v_sigma0=patient_speed_sd,
+        k_d_decay=k_d_decay,
+        v_sigma_growth=v_sigma_growth,
+    )
+    if spatial_strength_map is not None:
+        patient_kwargs["spatial_strength_map"] = spatial_strength_map
+
     for i in range(5):
         for j in range(5):
             hits = 0
-            patient = PatientModel(seed=patient_seed,
-                                   k_d0_per_sec=0.40,
-                                   v_sigma0=patient_speed_sd)
+            patient = PatientModel(**patient_kwargs)
             d_low, d_high = float(D_BINS[i]), float(D_BINS[i + 1])
             t_low, t_high = float(T_BINS[j]), float(T_BINS[j + 1])
 
@@ -84,23 +95,31 @@ def estimate_true_phit_tensor(patient_seed=7,
                               patient_speed = 0.20,
                               patient_speed_sd = 0.04,
                               patient_speed_sd_growth = 0.03,
+                              k_d_decay = 0,
+                              spatial_strength_map = None,
                               mc_per_cell=200):
     rng = np.random.default_rng(123)
     phit = np.zeros((5, 5, N_DIRECTIONS), dtype=float)
+
+    patient_kwargs = dict(
+        seed=patient_seed,
+        k_d0_per_sec=patient_speed,
+        v_sigma0=patient_speed_sd,
+        v_sigma_growth=patient_speed_sd_growth,
+        k_d_decay=k_d_decay,
+    )
+    if spatial_strength_map is not None:
+        patient_kwargs["spatial_strength_map"] = spatial_strength_map
 
     for i in range(5):
         for j in range(5):
             for ddir in range(N_DIRECTIONS):
                 hits = 0
-                patient = PatientModel(seed=patient_seed,
-                                       k_d0_per_sec=patient_speed,
-                                       v_sigma0=patient_speed_sd,
-                                       v_sigma_growth=patient_speed_sd_growth)
+                patient = PatientModel(**patient_kwargs)
                 d_low, d_high = float(D_BINS[i]), float(D_BINS[i + 1])
                 t_low, t_high = float(T_BINS[j]), float(T_BINS[j + 1])
 
                 prev_hit = True
-                az_bin, el_bin = direction_to_bins(ddir)
 
                 for _ in range(mc_per_cell):
                     d = float(rng.uniform(d_low, d_high))
@@ -112,8 +131,7 @@ def estimate_true_phit_tensor(patient_seed=7,
                         d_sys=d_sys,
                         distance_level=lvl,
                         previous_hit=prev_hit,
-                        azimuth_bin=az_bin,
-                        elevation_bin=el_bin,
+                        direction_bin=ddir,
                     )
                     h = bool(out["hit"])
                     hits += int(h)
@@ -241,5 +259,7 @@ def plot_phit_d_dir(phit_tensor, t_idx=None, reduce="mean"):
 phit_true = estimate_true_phit_tensor(patient_seed=7, 
                                       mc_per_cell=500, 
                                       patient_speed=0.10,
-                                      patient_speed_sd=0.04)
+                                      patient_speed_sd=0.04,
+                                      k_d_decay=0,
+                                      spatial_strength_map=None)
 plot_phit_d_dir(phit_true, reduce="mean")

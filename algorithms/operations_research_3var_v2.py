@@ -124,6 +124,9 @@ def score_candidate(d, t, *,
                     counts_5x5,
                     d_prev, t_prev,
                     w_eff=1.0, w_var=0.25, w_smooth=0.40,
+                    w_rom=0.0, w_time=0.0,
+                    p_gate_low=0.5, p_gate_high=0.7,
+                    apply_gate=True,
                     p_min=0.10,
                     patient: PatientModel):
     # effort: keep predicted hit prob near p_star (hard but doable)
@@ -131,6 +134,8 @@ def score_candidate(d, t, *,
     p = combine_hit_probs_odds(p_dt, p_dir)
     if p < p_min:
         return -1e9, p  # hard safety filter
+    if apply_gate and not (p_gate_low < p < p_gate_high):
+        return -1e9, p
 
     # effort: normalize squared error to [0, 1]
     # max error is (0 - p_star)^2 = p_star^2
@@ -146,9 +151,20 @@ def score_candidate(d, t, *,
     var_max = math.log(total + 25) if total > 0 else math.log(25)
     var_normalized = var_raw / (var_max + 1e-9)  # 1 = maximally rare bin
 
-    score = w_eff * eff_normalized + w_var * var_normalized
+    # Centered features in [-1, 1] let learned weights drift positive or negative.
+    d_norm = (d - D_MIN) / (D_MAX - D_MIN + 1e-12)
+    t_norm = (t - T_MIN) / (T_MAX - T_MIN + 1e-12)
+    rom_feature = 2.0 * d_norm - 1.0
+    time_feature = 2.0 * t_norm - 1.0
+    smooth = smooth_penalty(d, t, d_prev, t_prev)
 
-    """Interestingly, adding the rom and speed score does not really change the overall behavior much, but it gives prioritize to  higher d and t"""
+    score = (
+        w_eff * eff_normalized
+        + w_var * var_normalized
+        + w_rom * rom_feature
+        + w_time * time_feature
+        - w_smooth * smooth
+    )
 
     return score, p
 
@@ -167,6 +183,17 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
     # objective targets
     p_star = 0.70         # desired hit probability
     p_min = 0.10          # safety: don't choose near-impossible tasks
+    p_gate_low = 0.5
+    p_gate_high = 0.7
+
+    # Adaptive preference weights: neutral start (no initial preference).
+    w_rom = 0.0
+    w_time = 0.0
+    eta_pref = 0.03
+    pref_decay = 0.001
+    w_abs_max = 2.0
+    reward_baseline = 0.0
+    baseline_alpha = 0.05
 
     counts_5x5 = np.zeros((5, 5), dtype=int)
 
@@ -177,7 +204,8 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
     hist = {
         "d": [], "t": [], "v_req": [], "p_pred": [],
         "hit": [], "time_ratio": [], "dist_ratio": [],
-        "v_hat": [], "sigma_v": [], "score": [], "direction": []
+        "v_hat": [], "sigma_v": [], "score": [], "direction": [],
+        "w_rom": [], "w_time": [], "reward": [], "reward_baseline": []
     }
 
     for k in range(n_trials):
@@ -205,6 +233,9 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
                 counts_5x5=counts_5x5,
                 d_prev=d_prev, t_prev=t_prev,
                 w_eff=1.0, w_var=0.40, w_smooth=0.40,
+                w_rom=w_rom, w_time=w_time,
+                p_gate_low=p_gate_low, p_gate_high=p_gate_high,
+                apply_gate=True,
                 p_min=p_min,
                 patient=patient
             )
@@ -212,6 +243,30 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
                 best_score = sc
                 best = (float(d), float(t))
                 best_p = p
+
+        # Fallback: if no candidate in the gated band, choose best feasible candidate.
+        if best is None:
+            best_score = -1e18
+            for (d, t, cand_dir) in CANDIDATES:
+                if int(cand_dir) != direction:
+                    continue
+                sc, p = score_candidate(
+                    d, t,
+                    v_hat=v_hat, sigma_v=sigma_v,
+                    p_dir=p_dir,
+                    p_star=p_star,
+                    counts_5x5=counts_5x5,
+                    d_prev=d_prev, t_prev=t_prev,
+                    w_eff=1.0, w_var=0.40, w_smooth=0.40,
+                    w_rom=w_rom, w_time=w_time,
+                    apply_gate=False,
+                    p_min=p_min,
+                    patient=patient
+                )
+                if sc > best_score:
+                    best_score = sc
+                    best = (float(d), float(t))
+                    best_p = p
 
         d_sys, t_sys = best
         v_req = d_sys / max(t_sys, 1e-9)
@@ -251,6 +306,26 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
         if len(v_patient) >= 2:
             sigma_v = float(np.std(v_patient, ddof=1))
 
+        # Reward and adaptive drift of preference weights.
+        d_norm = (d_sys - D_MIN) / (D_MAX - D_MIN + 1e-12)
+        t_norm = (t_sys - T_MIN) / (T_MAX - T_MIN + 1e-12)
+        rom_feature = 2.0 * d_norm - 1.0
+        time_feature = 2.0 * t_norm - 1.0
+
+        # Reward balances success and quality of execution.
+        reward = (
+            1.0 * float(hit)
+            + 0.25 * float(outcome["dist_ratio"])
+            + 0.25 * (1.0 - abs(float(best_p) - p_star))
+        )
+        reward_baseline = (1.0 - baseline_alpha) * reward_baseline + baseline_alpha * reward
+        advantage = reward - reward_baseline
+
+        w_rom = (1.0 - pref_decay) * w_rom + eta_pref * advantage * rom_feature
+        w_time = (1.0 - pref_decay) * w_time + eta_pref * advantage * time_feature
+        w_rom = float(np.clip(w_rom, -w_abs_max, w_abs_max))
+        w_time = float(np.clip(w_time, -w_abs_max, w_abs_max))
+
         # log
         hist["d"].append(d_sys)
         hist["t"].append(t_sys)
@@ -263,6 +338,10 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
         hist["sigma_v"].append(sigma_v)
         hist["score"].append(best_score)
         hist["direction"].append(direction)
+        hist["w_rom"].append(w_rom)
+        hist["w_time"].append(w_time)
+        hist["reward"].append(reward)
+        hist["reward_baseline"].append(reward_baseline)
 
         d_prev, t_prev = d_sys, t_sys
 
