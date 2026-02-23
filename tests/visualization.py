@@ -56,13 +56,16 @@ def plot_v_mean_by_profile(patient_profiles, PatientModel):
     fig, ax = plt.subplots(figsize=(8, 5))
     for name, params in patient_profiles.items():
         model = PatientModel(**params)
-        d_vals = model.d_means
+        d_vals = np.asarray(model.d_means, dtype=float)
+        d_vals = np.concatenate(([0.0], d_vals))
         v_mean = model._mean_speed(d_vals)
         ax.plot(d_vals, v_mean, label=name, linewidth=2.0)
 
     ax.set_title("Mean speed against time")
     ax.set_xlabel("Distance reached (m)")
     ax.set_ylabel("Mean speed of the patient (m/s)")
+    ax.set_xlim(left=0.0)
+    ax.set_ylim(bottom=0.0)
     ax.grid(True, alpha=0.3)
     ax.legend()
     fig.tight_layout()

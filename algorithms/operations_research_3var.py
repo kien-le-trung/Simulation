@@ -103,6 +103,19 @@ def combine_hit_probs_odds(p_dt, p_dir, eps=1e-9):
     return odds / (1.0 + odds)
 
 
+def beta_mode(alpha, beta):
+    alpha = float(alpha)
+    beta = float(beta)
+    if alpha > 1.0 and beta > 1.0:
+        return (alpha - 1.0) / (alpha + beta - 2.0)
+    if alpha <= 1.0 and beta > 1.0:
+        return 0.0
+    if beta <= 1.0 and alpha > 1.0:
+        return 1.0
+    # Both <= 1.0 gives a bimodal U-shape; fall back to neutral midpoint.
+    return 0.5
+
+
 # ----------------------------
 # Map continuous d to your PatientModel distance_level (0..7)
 # Uses the rule in your comment: closest bucket with d_mean <= d_sys
@@ -139,8 +152,7 @@ def score_candidate(d, t, *,
                     patient: PatientModel):
     # effort: keep predicted hit prob near p_star (hard but doable)
     p_dt = p_hit_from_speed(d, t, v_hat, sigma_v)
-    # p = combine_hit_probs_odds(p_dt, p_dir)
-    p = p_dt
+    p = combine_hit_probs_odds(p_dt, p_dir)
 
     if p < p_min:
         return -1e9, p  # hard safety filter
@@ -219,40 +231,36 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7, ema_alpha=0.10, calib
 
     for k in range(n_trials):
 
-        # Thompson sample direction and pick closest to 0.7
-        dir_samples = rng.beta(patient.spatial_success_alpha,
-                               patient.spatial_success_beta)
-        direction = int(np.argmin(np.abs(dir_samples - 0.7)))
+        # Use Beta posterior mode per direction, then score all candidates globally.
+        dir_modes = np.array([
+            beta_mode(a, b)
+            for (a, b) in zip(patient.spatial_success_alpha, patient.spatial_success_beta)
+        ], dtype=float)
 
-        # randomly choose a direction
-        # direction = rng.integers(0, N_DIRECTIONS)
-        p_dir = float(dir_samples[direction])
-
-        # choose best candidate on lattice (for chosen direction)
+        # choose best candidate on lattice across all directions
         best = None
         best_score = -1e18
         best_p = None
 
         for (d, t, cand_dir) in CANDIDATES:
-            if int(cand_dir) != direction:
-                continue
+            cand_direction = int(cand_dir)
             sc, p = score_candidate(
                 d, t,
                 v_hat=v_hat, sigma_v=sigma_v,
-                p_dir=p_dir,
+                p_dir=float(dir_modes[cand_direction]),
                 p_star=p_star,
                 counts_5x5=counts_5x5,
-                w_eff=1.0, w_var=0.05,
+                w_eff=1.0, w_var=0.25,
                 p_min=p_min,
                 patient=patient
             )
 
             if sc > best_score:
                 best_score = sc
-                best = (float(d), float(t))
+                best = (float(d), float(t), cand_direction)
                 best_p = p
 
-        d_sys, t_sys = best
+        d_sys, t_sys, direction = best
         v_req = d_sys / max(t_sys, 1e-9)
 
         # update variability counts using the chosen bin

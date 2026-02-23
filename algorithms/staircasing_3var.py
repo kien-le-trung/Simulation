@@ -24,6 +24,20 @@ PatientModel = patient_mod.PatientModel
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
+
+def beta_mode(alpha: float, beta: float) -> float:
+    alpha = float(alpha)
+    beta = float(beta)
+    if alpha > 1.0 and beta > 1.0:
+        return (alpha - 1.0) / (alpha + beta - 2.0)
+    if alpha <= 1.0 and beta > 1.0:
+        return 0.0
+    if beta <= 1.0 and alpha > 1.0:
+        return 1.0
+    # U-shaped when both <= 1: use neutral midpoint.
+    return 0.5
+
+
 @dataclass
 class StaircaseConfig:
     # Bounds (match what’s realistic in your game)
@@ -89,9 +103,9 @@ class StaircaseController:
     def _rank_dirs(self, patient: PatientModel) -> List[int]:
         alpha = np.asarray(patient.spatial_success_alpha, dtype=float)
         beta = np.asarray(patient.spatial_success_beta, dtype=float)
-        p_hit = alpha / (alpha + beta + 1e-12)
-        # Lower p_hit => harder. Stable sort so ties keep deterministic order.
-        return list(np.argsort(p_hit, kind="stable"))
+        p_mode = np.array([beta_mode(a, b) for a, b in zip(alpha, beta)], dtype=float)
+        # Lower mode => harder. Stable sort so ties keep deterministic order.
+        return list(np.argsort(p_mode, kind="stable"))
 
     def _move_dir(self, patient: PatientModel, harder: bool) -> None:
         order = self._rank_dirs(patient)
@@ -106,23 +120,16 @@ class StaircaseController:
         self.dir = int(order[idx])
 
     def _sample_adjust_var(self) -> str:
-        return "d" if float(self.rng.uniform()) < 0.5 else "t"
-
-    def sample_direction_ts(self, patient: PatientModel) -> int:
-        alpha = np.asarray(patient.spatial_success_alpha, dtype=float)
-        beta = np.asarray(patient.spatial_success_beta, dtype=float)
-        ts_samples = self.rng.beta(alpha, beta)
-        direction = int(np.argmax(ts_samples))
-        direction = int(clamp(direction, self.cfg.dir_min, self.cfg.dir_max))
-        self.dir = direction
-        return direction
+        return str(self.rng.choice(["d", "t", "dir"]))
 
     def _make_harder(self, patient: PatientModel) -> None:
         adjust_var = self._sample_adjust_var()
         if adjust_var == "d":
             self.d += self.cfg.d_weight * self.cfg.d_step
-        else:
+        elif adjust_var == "t":
             self.t -= self.cfg.t_weight * self.cfg.t_step
+        else:
+            self._move_dir(patient, harder=True)
 
         self.d = clamp(self.d, self.cfg.d_min, self.cfg.d_max)
         self.t = clamp(self.t, self.cfg.t_min, self.cfg.t_max)
@@ -133,8 +140,10 @@ class StaircaseController:
         adjust_var = self._sample_adjust_var()
         if adjust_var == "d":
             self.d -= self.cfg.d_weight * self.cfg.d_step
-        else:
+        elif adjust_var == "t":
             self.t += self.cfg.t_weight * self.cfg.t_step
+        else:
+            self._move_dir(patient, harder=False)
 
         self.d = clamp(self.d, self.cfg.d_min, self.cfg.d_max)
         self.t = clamp(self.t, self.cfg.t_min, self.cfg.t_max)
@@ -287,7 +296,7 @@ def run_sim(
     for k in range(n_trials):
         resample = False
         d_sys, t_sys = controller.d, controller.t
-        direction = controller.sample_direction_ts(patient)
+        direction = int(controller.dir)
         lvl = distance_level_from_patient_bins(patient, d_sys)
 
         outcome = patient.sample_trial(

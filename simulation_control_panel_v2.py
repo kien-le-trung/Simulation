@@ -11,52 +11,40 @@ BASE_DIR = Path(__file__).resolve().parent
 PATIENT_PROFILES = {
     "overall_weak": {
         "k_d0_per_sec": 0.20,
-        "k_d_decay": 3.0,
+        "k_d_decay": 4.0,
         "v_sigma0": 0.06,
         "v_sigma_growth": 0.04,
         # 3x3 map flattened by idx = elevation * 3 + azimuth
         # elevation low->high, azimuth left->right
-        "spatial_strength_map": [
-            1.00, 0.88, 0.76,
-            0.84, 0.72, 0.60,
-            0.68, 0.56, 0.44,
-        ],
+        "spatial_strength_map": [1.0] * 9,
     },
     "overall_medium": {
         "k_d0_per_sec": 0.30,
-        "k_d_decay": 1.5,
+        "k_d_decay": 1.0,
         "v_sigma0": 0.04,
         "v_sigma_growth": 0.03,
-        "spatial_strength_map": [
-            1.00, 0.94, 0.88,
-            0.92, 0.86, 0.80,
-            0.84, 0.78, 0.72,
-        ],
+        "spatial_strength_map": [1.0] * 9,
     },
 
     "overall_strong": {
-        "k_d0_per_sec": 0.40,
-        "k_d_decay": 0.3,
+        "k_d0_per_sec": 0.70,
+        "k_d_decay": 0.1,
         "v_sigma0": 0.03,
         "v_sigma_growth": 0.01,
         "spatial_strength_map": [1.0] * 9,
     },
 
     "highspeed_lowrom": {
-        "k_d0_per_sec": 0.40,
+        "k_d0_per_sec": 0.70,
         "k_d_decay": 4.0,
-        "v_sigma0": 0.05,
-        "v_sigma_growth": 0.05,
-        "spatial_strength_map": [
-            1.00, 0.86, 0.72,
-            0.82, 0.68, 0.54,
-            0.64, 0.50, 0.36,
-        ],
+        "v_sigma0": 0.03,
+        "v_sigma_growth": 0.01,
+        "spatial_strength_map": [1.0] * 9,
     },
 
     "lowspeed_highrom": {
         "k_d0_per_sec": 0.20,
-        "k_d_decay": 0.3,
+        "k_d_decay": 0.1,
         "v_sigma0": 0.06,
         "v_sigma_growth": 0.04,
         "spatial_strength_map": [1.0] * 9,
@@ -271,7 +259,7 @@ if __name__ == "__main__":
         "control_system_3var",
         "operations_research_3var",
         "staircasing_3var",
-        "logistic_online_3var",
+        "logistic_online_3var_v2",
     ]
 
     for patient_profile in PATIENT_PROFILES.keys():
@@ -296,7 +284,8 @@ if __name__ == "__main__":
             result = run_algorithm(
                 algorithm_name=algorithm,
                 patient_profile=patient_profile,
-                n_trials=500,
+                n_trials=200,
+                calibration=False,
             )
             if not isinstance(result, tuple) or len(result) < 2:
                 raise ValueError(f"Unexpected result from {algorithm}: {type(result)}")
