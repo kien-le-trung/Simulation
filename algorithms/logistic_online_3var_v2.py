@@ -24,20 +24,38 @@ patient_mod = _load_module_from_path("patients.patient_simulation_v4", PATIENT_S
 PatientModel = patient_mod.PatientModel
 
 # -----------------------------
-# Discretize d, t into 5 levels
+# Candidate grid for (d, t, dir)
 # -----------------------------
 D_MIN, D_MAX = 0.10, 0.80
 T_MIN, T_MAX = 1.0, 7.0
 
-D_LEVELS = np.linspace(D_MIN, D_MAX, 5)
-T_LEVELS = np.linspace(T_MIN, T_MAX, 5)
+D_STEP = 0.05
+T_STEP = 0.5
 
-ACTIONS = [(i, j) for i in range(5) for j in range(5)]  # (d_idx, t_idx)
+D_GRID = np.round(np.arange(D_MIN, D_MAX + 1e-9, D_STEP), 4)
+T_GRID = np.round(np.arange(T_MIN, T_MAX + 1e-9, T_STEP), 4)
+CANDIDATES = [(float(d), float(t), int(direction)) for d in D_GRID for t in T_GRID for direction in range(9)]
 
 
-def action_to_dt(a):
-    i, j = a
-    return float(D_LEVELS[i]), float(T_LEVELS[j])
+def level5(x, xmin, xmax):
+    u = (x - xmin) / (xmax - xmin + 1e-12)
+    if u < 0.2: return 0
+    if u < 0.4: return 1
+    if u < 0.6: return 2
+    if u < 0.8: return 3
+    return 4
+
+
+def bin25(d, t):
+    return (level5(d, D_MIN, D_MAX), level5(t, T_MIN, T_MAX))
+
+
+def pick_with_tiebreak(candidates, score_fn, rng, maximize=False, atol=1e-12):
+    scores = np.array([float(score_fn(c)) for c in candidates], dtype=float)
+    best_score = float(np.max(scores) if maximize else np.min(scores))
+    tie_idx = np.where(np.isclose(scores, best_score, atol=atol, rtol=0.0))[0]
+    chosen = int(rng.choice(tie_idx))
+    return candidates[chosen]
 
 
 # -----------------------------
@@ -186,6 +204,7 @@ def run_controller(
     n_trials=200,
     seed=7,
     p_star=0.70,
+    p_tol=0.05,
     explore_prob=0.10,  # active-learning exploration near p=0.5
     p_jitter=0.30,
     calibration=True,
@@ -233,50 +252,29 @@ def run_controller(
             model.update(hit, d_exec, t_exec, direction, d_exec, t_exec, direction)
 
     for k in range(n_trials):
-        dir_samples = rng.beta(patient.spatial_success_alpha,
-                               patient.spatial_success_beta)
-        direction = int(np.argmin(np.abs(dir_samples - p_star)))
-        # compute predicted p and uncertainty for all 25 actions (intended grid points)
-        p_hat = np.zeros((5, 5), dtype=float)
-        uncert = np.zeros((5, 5), dtype=float)
-        for i in range(5):
-            for j in range(5):
-                d, t = float(D_LEVELS[i]), float(T_LEVELS[j])
-                p_hat[i, j] = model.predict_p(d, t, direction)
-                uncert[i, j] = 1.0 - 2.0 * abs(p_hat[i, j] - 0.5)
+        # score full candidate grid, then keep only near-target p(hit)
+        scored = []
+        for d, t, direction in CANDIDATES:
+            p_pred = model.predict_p(d, t, direction)
+            uncert = 1.0 - 2.0 * abs(p_pred - 0.5)
+            scored.append((d, t, direction, p_pred, uncert))
 
-        # choose action
+        near_target = [x for x in scored if abs(x[3] - p_star) <= p_tol]
+        pool = near_target if len(near_target) > 0 else scored
+
+        # choose candidate with exploration probability
         if rng.random() < explore_prob:
-            # Active learning: pick highest uncertainty (closest to p=0.5)
-            # tie-break: prefer slightly harder (farther d and shorter t)
-            best = None
-            best_score = -1e18
-            for i in range(5):
-                for j in range(5):
-                    d, t = float(D_LEVELS[i]), float(T_LEVELS[j])
-                    dn = normalize_d(d)
-                    ht = hard_time_feature(t)
-                    score = uncert[i, j] #+ 0.08 * dn + 0.06 * ht
-                    if score > best_score:
-                        best_score = score
-                        best = (i, j)
-            a = best
+            # exploration: pick highest-uncertainty candidate in pool
+            d, t, direction, p_pred_intended, uncert_val = pick_with_tiebreak(
+                pool, score_fn=lambda x: x[4], rng=rng, maximize=True
+            )
         else:
-            # Exploit: choose actions whose predicted p is close to p_star, and nudged harder
-            # This is "policy from model" instead of tabular Q.
-            score = -((p_hat - p_star) ** 2)
-            score += 0.08 * (D_LEVELS[:, None] - D_MIN) / (D_MAX - D_MIN + 1e-12)
-            score += 0.05 * hard_time_feature(T_LEVELS[None, :])
-            # softmax sample
-            z = score.reshape(-1)
-            z = z - np.max(z)
-            probs = np.exp(z / 0.12)
-            probs = probs / probs.sum()
-            idx = rng.choice(len(ACTIONS), p=probs)
-            a = ACTIONS[idx]
+            # exploitation: best p(hit) match to target in pool
+            d, t, direction, p_pred_intended, uncert_val = pick_with_tiebreak(
+                pool, score_fn=lambda x: abs(x[3] - p_star), rng=rng, maximize=False
+            )
 
-        i, j = a
-        d, t = action_to_dt(a)
+        i, j = bin25(d, t)
 
         # apply jitter to executed system values
         d_sys, t_sys = apply_jitter(d, t, rng, p_jitter=p_jitter)
@@ -299,7 +297,7 @@ def run_controller(
 
         # update model (beta on executed, w on intended via shaped reward)
         p_exec_before = model.predict_p(d_sys, t_sys, direction)
-        p_int_before = model.predict_p(d, t, direction)
+        p_int_before = p_pred_intended
         p_exec_after, I_exec, p_int_after = model.update(
             hit, d_sys, t_sys, direction, d, t, direction
         )
@@ -323,7 +321,7 @@ def run_controller(
         hist["direction"].append(int(direction))
         hist["p_pred_intended"].append(float(p_int_before))
         hist["p_pred_exec"].append(float(p_exec_before))
-        hist["uncert"].append(float(uncert[i, j]))
+        hist["uncert"].append(float(uncert_val))
         hist["hit"].append(int(hit))
         hist["rolling_hit"].append(roll)
         hist["beta0"].append(float(model.beta0))

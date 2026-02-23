@@ -24,12 +24,12 @@ D_BINS = np.linspace(D_MIN, D_MAX, 6)
 T_BINS = np.linspace(T_MIN, T_MAX, 6)
 
 ACTIONS = [(i, j) for i in range(5) for j in range(5)]  # (d_idx, t_idx)
-N_DIRECTIONS = 8
+N_DIRECTIONS = 9
 
 def direction_to_bins(direction: int) -> tuple[int, int]:
     d = int(np.clip(direction, 0, N_DIRECTIONS - 1))
-    az = d % 4
-    el = d // 4
+    az = d % 3
+    el = d // 3
     return az, el
 
 
@@ -188,15 +188,15 @@ def plot_patient_spatial_ability(
         raise ValueError("Patient model has no spatial_strength_map attribute.")
 
     mat = np.array(patient.spatial_strength_map, dtype=float)
-    if mat.shape == (8,):
-        mat = mat.reshape(2, 4)
-    if mat.shape != (2, 4):
-        raise ValueError(f"Expected spatial_strength_map shape (8,) or (2, 4); got {mat.shape}.")
+    if mat.shape == (9,):
+        mat = mat.reshape(3, 3)
+    if mat.shape != (3, 3):
+        raise ValueError(f"Expected spatial_strength_map shape (9,) or (3, 3); got {mat.shape}.")
 
     if azimuth_labels is None:
-        azimuth_labels = ["left", "front_left", "front_right", "right"]
+        azimuth_labels = ["left", "center", "right"]
     if elevation_labels is None:
-        elevation_labels = ["lower", "upper"]
+        elevation_labels = ["lower", "mid", "upper"]
 
     plt.figure()
     plt.imshow(mat, aspect="auto")

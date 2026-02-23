@@ -29,7 +29,7 @@ T_STEP = 0.25   # seconds
 
 d_grid = np.round(np.arange(D_MIN, D_MAX + 1e-9, D_STEP), 4)
 t_grid = np.round(np.arange(T_MIN, T_MAX + 1e-9, T_STEP), 4)
-N_DIRECTIONS = 8
+N_DIRECTIONS = 9
 CANDIDATES = np.array(
     [(d, t, direction) for d in d_grid for t in t_grid for direction in range(N_DIRECTIONS)],
     dtype=float,
@@ -114,6 +114,18 @@ def distance_level_from_patient_bins(patient: PatientModel, d_sys: float) -> int
     return int(candidates[-1])
 
 
+def apply_calibration_priors(patient: PatientModel, calibration_result: dict | None):
+    if not calibration_result:
+        return
+    per_direction = calibration_result.get("per_direction", {})
+    for direction, stats in per_direction.items():
+        idx = int(np.clip(direction, 0, 8))
+        n_reached = float(stats.get("n_reached", 0))
+        n_censored = float(stats.get("n_censored", 0))
+        patient.spatial_success_alpha[idx] += n_reached
+        patient.spatial_success_beta[idx] += n_censored
+
+
 # ----------------------------
 # OR Objective: score(d,t)
 # ----------------------------
@@ -122,13 +134,14 @@ def score_candidate(d, t, *,
                     p_dir,
                     p_star,
                     counts_5x5,
-                    d_prev, t_prev,
-                    w_eff=1.0, w_var=0.25, w_smooth=0.40,
+                    w_eff=1.0, w_var=0.20,
                     p_min=0.10,
                     patient: PatientModel):
     # effort: keep predicted hit prob near p_star (hard but doable)
     p_dt = p_hit_from_speed(d, t, v_hat, sigma_v)
-    p = combine_hit_probs_odds(p_dt, p_dir)
+    # p = combine_hit_probs_odds(p_dt, p_dir)
+    p = p_dt
+
     if p < p_min:
         return -1e9, p  # hard safety filter
 
@@ -156,22 +169,46 @@ def score_candidate(d, t, *,
 # ----------------------------
 # Main loop
 # ----------------------------
-def run_sim(patient: PatientModel, n_trials=10000, seed=7):
+def run_sim(patient: PatientModel, n_trials=10000, seed=7, ema_alpha=0.10, calibration=True):
     rng = np.random.default_rng(seed)
 
     # Online estimates (speed model)
-    v_patient = [] 
     v_hat = 0.25          # initial guess (m/s) until we have data
     sigma_v = 0.1        # initial uncertainty in effective speed
+    # Track an EMA of the second moment so std can be updated online as well.
+    m2_hat = v_hat**2 + sigma_v**2
 
     # objective targets
-    p_star = 0.70         # desired hit probability
+    p_star = 0.70        # desired hit probability
     p_min = 0.10          # safety: don't choose near-impossible tasks
 
     counts_5x5 = np.zeros((5, 5), dtype=int)
 
     d_prev, t_prev = None, None
     previous_hit = True
+
+    calibration_result = None
+    if calibration:
+        calibration_result = patient.calibration()
+        apply_calibration_priors(patient, calibration_result)
+
+        v_obs_list = []
+        for trial in calibration_result.get("trials", []):
+            d_sys = float(trial.get("d_sys", 0.0))
+            t_cap = float(trial.get("t_cap", 10.0))
+            reached = bool(trial.get("reached", trial.get("hit", False)))
+            if reached:
+                t_pat_obs = float(trial.get("t_pat_obs", trial.get("t_pat", t_cap)))
+                v_obs = d_sys / max(t_pat_obs, 1e-6)
+            else:
+                d_pat = float(trial.get("d_pat", float(trial.get("dist_ratio", 0.0)) * d_sys))
+                v_obs = d_pat / max(t_cap, 1e-6)
+            v_obs_list.append(v_obs)
+        if len(v_obs_list) > 0:
+            v_arr = np.asarray(v_obs_list, dtype=float)
+            v_hat = float(np.mean(v_arr))
+            sigma_v = float(np.clip(np.std(v_arr), 1e-3, None))
+            m2_hat = v_hat**2 + sigma_v**2
 
     # logs
     hist = {
@@ -181,10 +218,12 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
     }
 
     for k in range(n_trials):
+
         # Thompson sample direction and pick closest to 0.7
         dir_samples = rng.beta(patient.spatial_success_alpha,
                                patient.spatial_success_beta)
         direction = int(np.argmin(np.abs(dir_samples - 0.7)))
+
         # randomly choose a direction
         # direction = rng.integers(0, N_DIRECTIONS)
         p_dir = float(dir_samples[direction])
@@ -203,11 +242,11 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
                 p_dir=p_dir,
                 p_star=p_star,
                 counts_5x5=counts_5x5,
-                d_prev=d_prev, t_prev=t_prev,
-                w_eff=1.0, w_var=0.40, w_smooth=0.40,
+                w_eff=1.0, w_var=0.05,
                 p_min=p_min,
                 patient=patient
             )
+
             if sc > best_score:
                 best_score = sc
                 best = (float(d), float(t))
@@ -240,16 +279,16 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
         if hit:
             # On hits: d_pat = d_sys (always reaches target), t_pat = actual time
             v_obs_hit = d_pat / max(t_pat, 1e-6)
-            v_patient.append(v_obs_hit)
+            v_obs = v_obs_hit
         else:
             # On misses: use distance achieved over time allowed (not t_pat)
             v_obs_miss = d_pat / max(t_sys, 1e-6)
-            v_patient.append(v_obs_miss)
+            v_obs = v_obs_miss
 
-        
-        v_hat = float(np.mean(v_patient))
-        if len(v_patient) >= 2:
-            sigma_v = float(np.std(v_patient, ddof=1))
+        alpha = float(np.clip(ema_alpha, 1e-6, 1.0))
+        v_hat = (1.0 - alpha) * v_hat + alpha * v_obs
+        m2_hat = (1.0 - alpha) * m2_hat + alpha * (v_obs ** 2)
+        sigma_v = float(np.sqrt(max(m2_hat - v_hat**2, 1e-9)))
 
         # log
         hist["d"].append(d_sys)

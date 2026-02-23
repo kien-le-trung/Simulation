@@ -4,17 +4,44 @@ import numpy as np
 # heatmaps
 xlabels = ["shortest", "short", "medium", "long", "longest"]  # time bins
 ylabels = ["closest", "close", "medium", "far", "farthest"]   # distance bins
-N_DIRECTIONS = 8
-DIR_INDEX_TO_ANGLE = {
-    0: 0,
-    1: 30,
-    2: 45,
-    3: 60,
-    4: 90,
-    5: 120,
-    6: 135,
-    7: 150,
+N_DIRECTIONS = 9
+N_AZIMUTH_BINS = 3
+N_ELEVATION_BINS = 3
+AZIMUTH_RANGE_DEG = 110.0
+ELEVATION_RANGE_DEG = 96.0
+
+
+def _bin_center_angle(bin_idx: int, n_bins: int, total_range_deg: float) -> float:
+    bin_width = total_range_deg / float(n_bins)
+    min_angle = -0.5 * total_range_deg
+    return min_angle + (float(bin_idx) + 0.5) * bin_width
+
+
+def direction_index_to_bins(direction: int) -> tuple[int, int]:
+    idx = int(np.clip(direction, 0, N_DIRECTIONS - 1))
+    az_idx = idx % N_AZIMUTH_BINS
+    el_idx = idx // N_AZIMUTH_BINS
+    return az_idx, el_idx
+
+
+def direction_index_to_azimuth(direction: int) -> float:
+    az_idx, _ = direction_index_to_bins(direction)
+    return _bin_center_angle(az_idx, N_AZIMUTH_BINS, AZIMUTH_RANGE_DEG)
+
+
+def direction_index_to_elevation(direction: int) -> float:
+    _, el_idx = direction_index_to_bins(direction)
+    return _bin_center_angle(el_idx, N_ELEVATION_BINS, ELEVATION_RANGE_DEG)
+
+
+DIR_INDEX_TO_AZIMUTH_ANGLE = {
+    d: direction_index_to_azimuth(d) for d in range(N_DIRECTIONS)
 }
+DIR_INDEX_TO_ELEVATION_ANGLE = {
+    d: direction_index_to_elevation(d) for d in range(N_DIRECTIONS)
+}
+# Backward-compatible alias used by existing callers.
+DIR_INDEX_TO_ANGLE = DIR_INDEX_TO_AZIMUTH_ANGLE
 
 
 def _finalize_figure(fig, save_path=None, show=True):
@@ -86,7 +113,7 @@ def phit_tensor_from_hist(
     t_max=7.0,
     n_d=5,
     n_t=5,
-    n_dir=8,
+    n_dir=9,
 ):
     def _level5(x, xmin, xmax):
         u = (x - xmin) / (xmax - xmin + 1e-12)
@@ -136,7 +163,12 @@ def plot_phit_d_dir(phit_tensor, t_idx=None, reduce="mean", save_path=None, show
     ax.imshow(mat, aspect="auto")
     ax.set_title(title)
     ax.set_xticks(range(N_DIRECTIONS))
-    ax.set_xticklabels([f"{DIR_INDEX_TO_ANGLE.get(d, d)} deg" for d in range(N_DIRECTIONS)])
+    labels = []
+    for d in range(N_DIRECTIONS):
+        az = DIR_INDEX_TO_AZIMUTH_ANGLE.get(d, float(d))
+        el = DIR_INDEX_TO_ELEVATION_ANGLE.get(d, float(d))
+        labels.append(f"az {az:.1f}, el {el:.1f}")
+    ax.set_xticklabels(labels, rotation=45, ha="right")
     ax.set_yticks(range(5))
     ax.set_yticklabels(ylabels)
     for i in range(mat.shape[0]):
@@ -163,8 +195,31 @@ def average_direction(hist):
     directions = np.asarray(hist.get("direction", []), dtype=float)
     if directions.size == 0:
         return float("nan")
-    angles = np.array([DIR_INDEX_TO_ANGLE.get(int(d), d) for d in directions], dtype=float)
+    angles = np.array(
+        [DIR_INDEX_TO_AZIMUTH_ANGLE.get(int(d), d) for d in directions],
+        dtype=float,
+    )
     return float(np.mean(angles)), float(np.std(angles))
+
+
+def average_direction_components(hist):
+    directions = np.asarray(hist.get("direction", []), dtype=float)
+    if directions.size == 0:
+        return float("nan"), float("nan"), float("nan"), float("nan")
+    az_angles = np.array(
+        [DIR_INDEX_TO_AZIMUTH_ANGLE.get(int(d), d) for d in directions],
+        dtype=float,
+    )
+    el_angles = np.array(
+        [DIR_INDEX_TO_ELEVATION_ANGLE.get(int(d), d) for d in directions],
+        dtype=float,
+    )
+    return (
+        float(np.mean(az_angles)),
+        float(np.std(az_angles)),
+        float(np.mean(el_angles)),
+        float(np.std(el_angles)),
+    )
 
 
 def rolling_hitting_rate(hist, window=50, min_periods=1):
@@ -197,7 +252,7 @@ def rolling_hitting_rate(hist, window=50, min_periods=1):
     return rates
 
 
-def rolling_hit_rates(hist, window=50, min_periods=1):
+def rolling_hit_rates(hist, window=10, min_periods=1):
     rolling = rolling_hitting_rate(hist, window=window, min_periods=min_periods)
     hits = np.asarray(hist.get("hit", []), dtype=float)
     overall = float(np.mean(hits)) if hits.size > 0 else float("nan")
@@ -362,6 +417,284 @@ def plot_caterpillar_means_by_profile(
     axes[-1, 0].set_xlabel("Time (s)")
     axes[-1, 1].set_xlabel("Distance (m)")
     axes[-1, 2].set_xlabel("Direction (degrees)")
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    _finalize_figure(fig, save_path=save_path, show=show)
+
+
+def plot_caterpillar_means_by_algorithm(
+    profile_stats,
+    title="Caterpillar Plot: Mean and Std by Algorithm",
+    time_xlim=None,
+    dist_xlim=None,
+    dir_xlim=None,
+    save_path=None,
+    show=True,
+):
+    """
+    Create one figure with a row per algorithm and 3 columns (time/dist/direction).
+
+    profile_stats format:
+      {
+        "profile_name": {
+          "algorithm_names": [...],
+          "means_time": [...], "std_time": [...],
+          "means_dist": [...], "std_dist": [...],
+          "means_dir": [...],  "std_dir": [...],
+        },
+        ...
+      }
+    """
+    if not isinstance(profile_stats, dict) or len(profile_stats) == 0:
+        raise ValueError("profile_stats must be a non-empty dict")
+
+    profile_names = list(profile_stats.keys())
+    first_profile = profile_stats[profile_names[0]]
+    algorithm_names = list(first_profile["algorithm_names"])
+    n_algorithms = len(algorithm_names)
+    n_profiles = len(profile_names)
+
+    # Validate that each profile reports stats for the same algorithms in same order.
+    for profile_name in profile_names:
+        stats = profile_stats[profile_name]
+        if list(stats["algorithm_names"]) != algorithm_names:
+            raise ValueError("All profiles must have the same algorithm_names order")
+        if not (
+            len(stats["means_time"]) == len(stats["std_time"]) == n_algorithms
+            and len(stats["means_dist"]) == len(stats["std_dist"]) == n_algorithms
+            and len(stats["means_dir"]) == len(stats["std_dir"]) == n_algorithms
+        ):
+            raise ValueError("Each profile must provide one mean/std per algorithm")
+
+    fig, axes = plt.subplots(
+        n_algorithms,
+        3,
+        figsize=(12, max(3.5, 2.6 * n_algorithms)),
+        sharex="col",
+        squeeze=False,
+    )
+    xlims = [time_xlim, dist_xlim, dir_xlim]
+
+    for row_idx, algorithm_name in enumerate(algorithm_names):
+        y = np.arange(n_profiles)
+        means_time = [profile_stats[p]["means_time"][row_idx] for p in profile_names]
+        std_time = [profile_stats[p]["std_time"][row_idx] for p in profile_names]
+        means_dist = [profile_stats[p]["means_dist"][row_idx] for p in profile_names]
+        std_dist = [profile_stats[p]["std_dist"][row_idx] for p in profile_names]
+        means_dir = [profile_stats[p]["means_dir"][row_idx] for p in profile_names]
+        std_dir = [profile_stats[p]["std_dir"][row_idx] for p in profile_names]
+
+        panels = [
+            ("Time", means_time, std_time),
+            ("Distance", means_dist, std_dist),
+            ("Direction", means_dir, std_dir),
+        ]
+
+        for col_idx, ((label, means, stds), xlim) in enumerate(zip(panels, xlims)):
+            ax = axes[row_idx, col_idx]
+            means = np.asarray(means, dtype=float)
+            stds = np.asarray(stds, dtype=float)
+            ax.errorbar(means, y, xerr=stds, fmt="o", capsize=3, linewidth=1.5)
+            ax.grid(True, axis="x", alpha=0.3)
+            if xlim is not None:
+                ax.set_xlim(*xlim)
+            if row_idx == 0:
+                ax.set_title(label)
+            if col_idx > 0:
+                ax.tick_params(axis="y", which="both", left=False, labelleft=False)
+
+        axes[row_idx, 0].set_yticks(y)
+        axes[row_idx, 0].set_yticklabels(profile_names)
+        axes[row_idx, 0].set_ylabel(algorithm_name)
+
+    axes[-1, 0].set_xlabel("Time (s)")
+    axes[-1, 1].set_xlabel("Distance (m)")
+    axes[-1, 2].set_xlabel("Direction (degrees)")
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    _finalize_figure(fig, save_path=save_path, show=show)
+
+
+def plot_caterpillar_means_by_profile(
+    profile_stats,
+    title="Caterpillar Plot: Mean and Std by Profile",
+    time_xlim=None,
+    dist_xlim=None,
+    dir_xlim=None,
+    dir_az_xlim=None,
+    dir_el_xlim=None,
+    save_path=None,
+    show=True,
+):
+    if not isinstance(profile_stats, dict) or len(profile_stats) == 0:
+        raise ValueError("profile_stats must be a non-empty dict")
+
+    profile_names = list(profile_stats.keys())
+    n_profiles = len(profile_names)
+    first_stats = profile_stats[profile_names[0]]
+    has_components = all(
+        k in first_stats for k in ("means_dir_az", "std_dir_az", "means_dir_el", "std_dir_el")
+    )
+    n_cols = 4 if has_components else 3
+
+    fig, axes = plt.subplots(
+        n_profiles,
+        n_cols,
+        figsize=(4 * n_cols, max(3.5, 2.6 * n_profiles)),
+        sharex="col",
+        squeeze=False,
+    )
+    az_xlim = dir_az_xlim if dir_az_xlim is not None else dir_xlim
+    xlims = [time_xlim, dist_xlim, az_xlim]
+    if has_components:
+        xlims.append(dir_el_xlim)
+
+    for row_idx, profile_name in enumerate(profile_names):
+        stats = profile_stats[profile_name]
+        algorithm_names = stats["algorithm_names"]
+        n_algs = len(algorithm_names)
+        y = np.arange(n_algs)
+
+        panels = [
+            ("Time", stats["means_time"], stats["std_time"]),
+            ("Distance", stats["means_dist"], stats["std_dist"]),
+        ]
+        if has_components:
+            panels.extend(
+                [
+                    ("Azimuth", stats["means_dir_az"], stats["std_dir_az"]),
+                    ("Elevation", stats["means_dir_el"], stats["std_dir_el"]),
+                ]
+            )
+        else:
+            panels.append(("Direction", stats["means_dir"], stats["std_dir"]))
+
+        for col_idx, ((label, means, stds), xlim) in enumerate(zip(panels, xlims)):
+            ax = axes[row_idx, col_idx]
+            means = np.asarray(means, dtype=float)
+            stds = np.asarray(stds, dtype=float)
+            ax.errorbar(means, y, xerr=stds, fmt="o", capsize=3, linewidth=1.5)
+            ax.grid(True, axis="x", alpha=0.3)
+            if xlim is not None:
+                ax.set_xlim(*xlim)
+            if row_idx == 0:
+                ax.set_title(label)
+            if col_idx > 0:
+                ax.tick_params(axis="y", which="both", left=False, labelleft=False)
+
+        axes[row_idx, 0].set_yticks(y)
+        axes[row_idx, 0].set_yticklabels(algorithm_names)
+        axes[row_idx, 0].set_ylabel(profile_name)
+
+    axes[-1, 0].set_xlabel("Time (s)")
+    axes[-1, 1].set_xlabel("Distance (m)")
+    axes[-1, 2].set_xlabel("Azimuth (degrees)" if has_components else "Direction (degrees)")
+    if has_components:
+        axes[-1, 3].set_xlabel("Elevation (degrees)")
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    _finalize_figure(fig, save_path=save_path, show=show)
+
+
+def plot_caterpillar_means_by_algorithm(
+    profile_stats,
+    title="Caterpillar Plot: Mean and Std by Algorithm",
+    time_xlim=None,
+    dist_xlim=None,
+    dir_xlim=None,
+    dir_az_xlim=None,
+    dir_el_xlim=None,
+    save_path=None,
+    show=True,
+):
+    if not isinstance(profile_stats, dict) or len(profile_stats) == 0:
+        raise ValueError("profile_stats must be a non-empty dict")
+
+    profile_names = list(profile_stats.keys())
+    first_profile = profile_stats[profile_names[0]]
+    algorithm_names = list(first_profile["algorithm_names"])
+    n_algorithms = len(algorithm_names)
+    n_profiles = len(profile_names)
+    has_components = all(
+        k in first_profile for k in ("means_dir_az", "std_dir_az", "means_dir_el", "std_dir_el")
+    )
+
+    for profile_name in profile_names:
+        stats = profile_stats[profile_name]
+        if list(stats["algorithm_names"]) != algorithm_names:
+            raise ValueError("All profiles must have the same algorithm_names order")
+        if not (
+            len(stats["means_time"]) == len(stats["std_time"]) == n_algorithms
+            and len(stats["means_dist"]) == len(stats["std_dist"]) == n_algorithms
+        ):
+            raise ValueError("Each profile must provide time/dist mean/std per algorithm")
+        if has_components:
+            if not (
+                len(stats["means_dir_az"]) == len(stats["std_dir_az"]) == n_algorithms
+                and len(stats["means_dir_el"]) == len(stats["std_dir_el"]) == n_algorithms
+            ):
+                raise ValueError("Each profile must provide azimuth/elevation mean/std per algorithm")
+        else:
+            if not (len(stats["means_dir"]) == len(stats["std_dir"]) == n_algorithms):
+                raise ValueError("Each profile must provide one direction mean/std per algorithm")
+
+    n_cols = 4 if has_components else 3
+    fig, axes = plt.subplots(
+        n_algorithms,
+        n_cols,
+        figsize=(4 * n_cols, max(3.5, 2.6 * n_algorithms)),
+        sharex="col",
+        squeeze=False,
+    )
+    az_xlim = dir_az_xlim if dir_az_xlim is not None else dir_xlim
+    xlims = [time_xlim, dist_xlim, az_xlim]
+    if has_components:
+        xlims.append(dir_el_xlim)
+
+    for row_idx, algorithm_name in enumerate(algorithm_names):
+        y = np.arange(n_profiles)
+        means_time = [profile_stats[p]["means_time"][row_idx] for p in profile_names]
+        std_time = [profile_stats[p]["std_time"][row_idx] for p in profile_names]
+        means_dist = [profile_stats[p]["means_dist"][row_idx] for p in profile_names]
+        std_dist = [profile_stats[p]["std_dist"][row_idx] for p in profile_names]
+
+        panels = [("Time", means_time, std_time), ("Distance", means_dist, std_dist)]
+        if has_components:
+            means_dir_az = [profile_stats[p]["means_dir_az"][row_idx] for p in profile_names]
+            std_dir_az = [profile_stats[p]["std_dir_az"][row_idx] for p in profile_names]
+            means_dir_el = [profile_stats[p]["means_dir_el"][row_idx] for p in profile_names]
+            std_dir_el = [profile_stats[p]["std_dir_el"][row_idx] for p in profile_names]
+            panels.extend([("Azimuth", means_dir_az, std_dir_az), ("Elevation", means_dir_el, std_dir_el)])
+        else:
+            means_dir = [profile_stats[p]["means_dir"][row_idx] for p in profile_names]
+            std_dir = [profile_stats[p]["std_dir"][row_idx] for p in profile_names]
+            panels.append(("Direction", means_dir, std_dir))
+
+        for col_idx, ((label, means, stds), xlim) in enumerate(zip(panels, xlims)):
+            ax = axes[row_idx, col_idx]
+            means = np.asarray(means, dtype=float)
+            stds = np.asarray(stds, dtype=float)
+            ax.errorbar(means, y, xerr=stds, fmt="o", capsize=3, linewidth=1.5)
+            ax.grid(True, axis="x", alpha=0.3)
+            if xlim is not None:
+                ax.set_xlim(*xlim)
+            if row_idx == 0:
+                ax.set_title(label)
+            if col_idx > 0:
+                ax.tick_params(axis="y", which="both", left=False, labelleft=False)
+
+        axes[row_idx, 0].set_yticks(y)
+        axes[row_idx, 0].set_yticklabels(profile_names)
+        axes[row_idx, 0].set_ylabel(algorithm_name)
+
+    axes[-1, 0].set_xlabel("Time (s)")
+    axes[-1, 1].set_xlabel("Distance (m)")
+    axes[-1, 2].set_xlabel("Azimuth (degrees)" if has_components else "Direction (degrees)")
+    if has_components:
+        axes[-1, 3].set_xlabel("Elevation (degrees)")
 
     fig.suptitle(title)
     fig.tight_layout()

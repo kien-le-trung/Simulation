@@ -29,7 +29,7 @@ T_STEP = 0.25   # seconds
 
 d_grid = np.round(np.arange(D_MIN, D_MAX + 1e-9, D_STEP), 4)
 t_grid = np.round(np.arange(T_MIN, T_MAX + 1e-9, T_STEP), 4)
-N_DIRECTIONS = 8
+N_DIRECTIONS = 9
 CANDIDATES = np.array(
     [(d, t, direction) for d in d_grid for t in t_grid for direction in range(N_DIRECTIONS)],
     dtype=float,

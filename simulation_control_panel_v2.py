@@ -9,53 +9,59 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # A simulation control panel for managing simulation parameters and execution.
 PATIENT_PROFILES = {
-    # Slow, limited range, high variability — e.g., elderly or post-injury
-    "overall_weak" : {
-        "k_d0_per_sec": 0.12,
+    "overall_weak": {
+        "k_d0_per_sec": 0.20,
         "k_d_decay": 3.0,
         "v_sigma0": 0.06,
         "v_sigma_growth": 0.04,
-        "spatial_strength_map": [0.3, 0.4, 0.4, 0.3, 0.5, 0.6, 0.6, 0.5],
+        # 3x3 map flattened by idx = elevation * 3 + azimuth
+        # elevation low->high, azimuth left->right
+        "spatial_strength_map": [
+            1.00, 0.88, 0.76,
+            0.84, 0.72, 0.60,
+            0.68, 0.56, 0.44,
+        ],
     },
-    # Comfortable pace, moderate range — typical healthy adult
-    "overall_medium" : {
-        "k_d0_per_sec": 0.35,
+    "overall_medium": {
+        "k_d0_per_sec": 0.30,
         "k_d_decay": 1.5,
         "v_sigma0": 0.04,
         "v_sigma_growth": 0.03,
-        "spatial_strength_map": [0.55, 0.65, 0.65, 0.55, 0.75, 0.85, 0.85, 0.75],
+        "spatial_strength_map": [
+            1.00, 0.94, 0.88,
+            0.92, 0.86, 0.80,
+            0.84, 0.78, 0.72,
+        ],
     },
-    # Fast, full range, low variability — athletic / young healthy
-    "overall_strong" : {
-        "k_d0_per_sec": 0.65,
+
+    "overall_strong": {
+        "k_d0_per_sec": 0.40,
         "k_d_decay": 0.3,
         "v_sigma0": 0.03,
         "v_sigma_growth": 0.01,
-        "spatial_strength_map": [0.7, 0.8, 0.85, 0.75, 0.85, 0.95, 1.0, 0.9],
+        "spatial_strength_map": [1.0] * 9,
     },
-    # Quick but range drops fast at distance/periphery — e.g., shoulder impairment
-    "highspeed_lowrom" : {
-        "k_d0_per_sec": 0.55,
+
+    "highspeed_lowrom": {
+        "k_d0_per_sec": 0.40,
         "k_d_decay": 4.0,
         "v_sigma0": 0.05,
         "v_sigma_growth": 0.05,
-        "spatial_strength_map": [0.2, 0.4, 0.4, 0.2, 0.5, 0.9, 0.9, 0.5],
+        "spatial_strength_map": [
+            1.00, 0.86, 0.72,
+            0.82, 0.68, 0.54,
+            0.64, 0.50, 0.36,
+        ],
     },
-    # Slow but can reach everything relatively evenly — e.g., deconditioned but mobile
-    "lowspeed_highrom" : {
-        "k_d0_per_sec": 0.15,
+
+    "lowspeed_highrom": {
+        "k_d0_per_sec": 0.20,
         "k_d_decay": 0.3,
-        "v_sigma0": 0.04,
-        "v_sigma_growth": 0.02,
-        "spatial_strength_map": [0.6, 0.7, 0.7, 0.6, 0.8, 0.85, 0.9, 0.85],
+        "v_sigma0": 0.06,
+        "v_sigma_growth": 0.04,
+        "spatial_strength_map": [1.0] * 9,
     },
 }
-
-ALGORITHMS = ["operations_research",
-              "QUEST_v2",
-              "staircasing",
-              "RL_logistic_index_simplified",
-              "control_system_v2"]
 
 def _load_module_from_path(module_name, module_path):
     spec = importlib.util.spec_from_file_location(module_name, module_path)
@@ -255,8 +261,10 @@ if __name__ == "__main__":
         float(0),
         float(np.max(default_patient.d_levels)),
     )
-    dir_angles = np.array(list(viz.DIR_INDEX_TO_ANGLE.values()), dtype=float)
-    dir_xlim = (float(np.min(dir_angles)), float(np.max(dir_angles)))
+    dir_az_angles = np.array(list(viz.DIR_INDEX_TO_AZIMUTH_ANGLE.values()), dtype=float)
+    dir_el_angles = np.array(list(viz.DIR_INDEX_TO_ELEVATION_ANGLE.values()), dtype=float)
+    dir_az_xlim = (float(np.min(dir_az_angles)), float(np.max(dir_az_angles)))
+    dir_el_xlim = (float(np.min(dir_el_angles)), float(np.max(dir_el_angles)))
     profile_caterpillar_stats = {}
 
     algorithms = [
@@ -275,10 +283,12 @@ if __name__ == "__main__":
 
         means_time = []
         means_dist = []
-        means_dir = []
+        means_dir_az = []
+        means_dir_el = []
         std_time = []
         std_dist = []
-        std_dir = []
+        std_dir_az = []
+        std_dir_el = []
         hits_by_algorithm = {}
 
         for algorithm in algorithms:
@@ -286,7 +296,7 @@ if __name__ == "__main__":
             result = run_algorithm(
                 algorithm_name=algorithm,
                 patient_profile=patient_profile,
-                n_trials=200,
+                n_trials=500,
             )
             if not isinstance(result, tuple) or len(result) < 2:
                 raise ValueError(f"Unexpected result from {algorithm}: {type(result)}")
@@ -294,19 +304,22 @@ if __name__ == "__main__":
 
             avg_time, sd_time = viz.average_time(logs)
             avg_dist, sd_dist = viz.average_distance(logs)
-            avg_dir, sd_dir = viz.average_direction(logs)
+            avg_dir_az, sd_dir_az, avg_dir_el, sd_dir_el = viz.average_direction_components(logs)
 
             means_time.append(avg_time)
             means_dist.append(avg_dist)
-            means_dir.append(avg_dir)
+            means_dir_az.append(avg_dir_az)
+            means_dir_el.append(avg_dir_el)
             std_time.append(sd_time)
             std_dist.append(sd_dist)
-            std_dir.append(sd_dir)
+            std_dir_az.append(sd_dir_az)
+            std_dir_el.append(sd_dir_el)
             hits_by_algorithm[algorithm] = logs.get("hit", [])
-
+            print(f"  Mean hit rate (last 200): {np.mean(np.array(logs.get('hit', []))[-200:]):.3f}")
             print(f"  Mean time: {avg_time:.4f} +/- {sd_time:.4f}")
             print(f"  Mean dist: {avg_dist:.4f} +/- {sd_dist:.4f}")
-            print(f"  Mean dir:  {avg_dir:.4f} +/- {sd_dir:.4f}")
+            print(f"  Mean az:   {avg_dir_az:.4f} +/- {sd_dir_az:.4f}")
+            print(f"  Mean el:   {avg_dir_el:.4f} +/- {sd_dir_el:.4f}")
 
             viz.plot_heatmap(
                 counts,
@@ -323,8 +336,10 @@ if __name__ == "__main__":
             "std_time": list(std_time),
             "means_dist": list(means_dist),
             "std_dist": list(std_dist),
-            "means_dir": list(means_dir),
-            "std_dir": list(std_dir),
+            "means_dir_az": list(means_dir_az),
+            "std_dir_az": list(std_dir_az),
+            "means_dir_el": list(means_dir_el),
+            "std_dir_el": list(std_dir_el),
         }
         viz.plot_rolling_hit_rate(
             hits_by_algorithm,
@@ -335,13 +350,14 @@ if __name__ == "__main__":
             show=False,
         )
 
-    viz.plot_caterpillar_means_by_profile(
+    viz.plot_caterpillar_means_by_algorithm(
         profile_stats=profile_caterpillar_stats,
-        title="Mean/SD by Algorithm Across Patient Profiles",
+        title="Mean/SD by Patient Profile Across Algorithms",
         time_xlim=time_xlim,
         dist_xlim=dist_xlim,
-        dir_xlim=dir_xlim,
-        save_path=assets_dir / "all_profiles_caterpillar.png",
+        dir_az_xlim=dir_az_xlim,
+        dir_el_xlim=dir_el_xlim,
+        save_path=assets_dir / "all_algorithms_caterpillar.png",
         show=False,
     )
     

@@ -73,6 +73,18 @@ def distance_level_3(d, dmin, dmax):
     return 2
 
 
+def apply_calibration_priors(patient: PatientModel, calibration_result: dict | None):
+    if not calibration_result:
+        return
+    per_direction = calibration_result.get("per_direction", {})
+    for direction, stats in per_direction.items():
+        idx = int(np.clip(direction, 0, 8))
+        n_reached = float(stats.get("n_reached", 0))
+        n_censored = float(stats.get("n_censored", 0))
+        patient.spatial_success_alpha[idx] += n_reached
+        patient.spatial_success_beta[idx] += n_censored
+
+
 # ----------------------------
 # Continuous-margin PI controller
 # ----------------------------
@@ -238,7 +250,7 @@ def run_sim(
     n_trials=100,
     seed=7,
     # controller targets/tuning
-    m_star=0.05,     # aim for "slightly comfortable but near the edge"
+    m_star=0.15,     # aim for "slightly comfortable but near the edge"
     Kp=0.9,
     Ki=0.15,
     ewma_alpha=0.15,
@@ -251,9 +263,14 @@ def run_sim(
     vmin=0.06, vmax=0.20,
     # diagonal resample control
     diag_after=10,
+    calibration=True,
 ):
     rng = np.random.default_rng(seed)
     ctrl = MarginPIController(m_star=m_star, Kp=Kp, Ki=Ki, ewma_alpha=ewma_alpha, u0=0.35)
+
+    if calibration:
+        calibration_result = patient.calibration()
+        apply_calibration_priors(patient, calibration_result)
 
     counts_5x5 = np.zeros((5, 5), dtype=int)
     previous_hit = True

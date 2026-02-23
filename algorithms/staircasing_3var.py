@@ -1,7 +1,6 @@
 from __future__ import annotations
 import importlib.util
 import math
-import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -33,7 +32,7 @@ class StaircaseConfig:
     t_min: float = 1.0
     t_max: float = 7.0
     dir_min: int = 0
-    dir_max: int = 7
+    dir_max: int = 8
 
     # Step sizes
     d_step: float = 0.05         # meters per difficulty change
@@ -41,7 +40,7 @@ class StaircaseConfig:
     dir_step: int = 1            # direction bin per change
 
     # Streak thresholds (classic “k-up / k-down” staircase)
-    k_up: int = 2                 # after 2 consecutive hits -> harder
+    k_up: int = 3                 # after 2 consecutive hits -> harder
     k_down: int = 2               # after 1 consecutive miss -> easier
 
     # How to change difficulty when moving "harder" or "easier"
@@ -56,7 +55,6 @@ class StaircaseConfig:
     quantize_t: float = 0.1
     quantize_dir: int = 1
 
-
 class StaircaseController:
     """
     Streak-based staircasing controller:
@@ -66,13 +64,21 @@ class StaircaseController:
     Keeps internal streak counts and updates (d, t) only when a threshold is reached.
     """
 
-    def __init__(self, config: StaircaseConfig, d0: float = 0.30, t0: float = 4.0, dir0: int = 0):
+    def __init__(
+        self,
+        config: StaircaseConfig,
+        d0: float = 0.30,
+        t0: float = 4.0,
+        dir0: int = 0,
+        rng: Optional[np.random.Generator] = None,
+    ):
         self.cfg = config
         self.d = clamp(d0, self.cfg.d_min, self.cfg.d_max)
         self.t = clamp(t0, self.cfg.t_min, self.cfg.t_max)
         self.dir = int(clamp(dir0, self.cfg.dir_min, self.cfg.dir_max))
         self.success_streak = 0
         self.fail_streak = 0
+        self.rng = rng if rng is not None else np.random.default_rng()
 
     def _quantize(self, d: float, t: float, direction: int) -> Tuple[float, float, int]:
         d = round(d / self.cfg.quantize_d) * self.cfg.quantize_d
@@ -99,14 +105,24 @@ class StaircaseController:
             idx = min(len(order) - 1, idx + 1)
         self.dir = int(order[idx])
 
+    def _sample_adjust_var(self) -> str:
+        return "d" if float(self.rng.uniform()) < 0.5 else "t"
+
+    def sample_direction_ts(self, patient: PatientModel) -> int:
+        alpha = np.asarray(patient.spatial_success_alpha, dtype=float)
+        beta = np.asarray(patient.spatial_success_beta, dtype=float)
+        ts_samples = self.rng.beta(alpha, beta)
+        direction = int(np.argmax(ts_samples))
+        direction = int(clamp(direction, self.cfg.dir_min, self.cfg.dir_max))
+        self.dir = direction
+        return direction
+
     def _make_harder(self, patient: PatientModel) -> None:
-        adjust_var = random.choice(["d", "t", "dir"])
+        adjust_var = self._sample_adjust_var()
         if adjust_var == "d":
             self.d += self.cfg.d_weight * self.cfg.d_step
-        elif adjust_var == "t":
-            self.t -= self.cfg.t_weight * self.cfg.t_step
         else:
-            self._move_dir(patient, harder=True)
+            self.t -= self.cfg.t_weight * self.cfg.t_step
 
         self.d = clamp(self.d, self.cfg.d_min, self.cfg.d_max)
         self.t = clamp(self.t, self.cfg.t_min, self.cfg.t_max)
@@ -114,13 +130,11 @@ class StaircaseController:
         self.d, self.t, self.dir = self._quantize(self.d, self.t, self.dir)
 
     def _make_easier(self, patient: PatientModel) -> None:
-        adjust_var = random.choice(["d", "t", "dir"])
+        adjust_var = self._sample_adjust_var()
         if adjust_var == "d":
             self.d -= self.cfg.d_weight * self.cfg.d_step
-        elif adjust_var == "t":
-            self.t += self.cfg.t_weight * self.cfg.t_step
         else:
-            self._move_dir(patient, harder=False)
+            self.t += self.cfg.t_weight * self.cfg.t_step
 
         self.d = clamp(self.d, self.cfg.d_min, self.cfg.d_max)
         self.t = clamp(self.t, self.cfg.t_min, self.cfg.t_max)
@@ -173,6 +187,18 @@ def distance_level_from_patient_bins(patient: PatientModel, d_sys: float) -> int
     d_means = np.asarray(patient.d_means, dtype=float)
     idx = np.where(d_means <= d_sys)[0]
     return int(idx[-1]) if len(idx) else 0
+
+
+def apply_calibration_priors(patient: PatientModel, calibration_result: dict | None):
+    if not calibration_result:
+        return
+    per_direction = calibration_result.get("per_direction", {})
+    for direction, stats in per_direction.items():
+        idx = int(np.clip(direction, 0, 8))
+        n_reached = float(stats.get("n_reached", 0))
+        n_censored = float(stats.get("n_censored", 0))
+        patient.spatial_success_alpha[idx] += n_reached
+        patient.spatial_success_beta[idx] += n_censored
 
 
 # ============================================================
@@ -233,9 +259,15 @@ def run_sim(
     t0: float = 4.0,
     dir0: int = 0,
     cfg: StaircaseConfig | None = None,
+    calibration: bool = True,
 ) -> Dict[str, List]:
     cfg = cfg or StaircaseConfig()
-    controller = StaircaseController(cfg, d0=d0, t0=t0, dir0=dir0)
+    rng = np.random.default_rng(seed)
+    controller = StaircaseController(cfg, d0=d0, t0=t0, dir0=dir0, rng=rng)
+
+    if calibration:
+        calibration_result = patient.calibration()
+        apply_calibration_priors(patient, calibration_result)
 
     logs: Dict[str, List] = {
         "trial": [],
@@ -254,7 +286,8 @@ def run_sim(
     previous_hit = True
     for k in range(n_trials):
         resample = False
-        d_sys, t_sys, direction = controller.d, controller.t, controller.dir
+        d_sys, t_sys = controller.d, controller.t
+        direction = controller.sample_direction_ts(patient)
         lvl = distance_level_from_patient_bins(patient, d_sys)
 
         outcome = patient.sample_trial(
@@ -273,7 +306,7 @@ def run_sim(
             patient.spatial_success_beta[direction] += 1.0
 
         # Update controller based on hit/miss streaks
-        _, _, direction, action = controller.update(hit, patient)
+        _, _, _, action = controller.update(hit, patient)
         if resample:
             action = f"resample: d,t,dir={controller.d:.2f},{controller.t:.2f},{controller.dir}"
 

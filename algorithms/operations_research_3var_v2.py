@@ -29,7 +29,7 @@ T_STEP = 0.25   # seconds
 
 d_grid = np.round(np.arange(D_MIN, D_MAX + 1e-9, D_STEP), 4)
 t_grid = np.round(np.arange(T_MIN, T_MAX + 1e-9, T_STEP), 4)
-N_DIRECTIONS = 8
+N_DIRECTIONS = 9
 CANDIDATES = np.array(
     [(d, t, direction) for d in d_grid for t in t_grid for direction in range(N_DIRECTIONS)],
     dtype=float,
@@ -114,59 +114,45 @@ def distance_level_from_patient_bins(patient: PatientModel, d_sys: float) -> int
     return int(candidates[-1])
 
 
-# ----------------------------
-# OR Objective: score(d,t)
-# ----------------------------
-def score_candidate(d, t, *,
-                    v_hat, sigma_v,
-                    p_dir,
-                    p_star,
-                    counts_5x5,
-                    d_prev, t_prev,
-                    w_eff=1.0, w_var=0.25, w_smooth=0.40,
-                    w_rom=0.0, w_time=0.0,
-                    p_gate_low=0.5, p_gate_high=0.7,
-                    apply_gate=True,
-                    p_min=0.10,
-                    patient: PatientModel):
-    # effort: keep predicted hit prob near p_star (hard but doable)
-    p_dt = p_hit_from_speed(d, t, v_hat, sigma_v)
-    p = combine_hit_probs_odds(p_dt, p_dir)
-    if p < p_min:
-        return -1e9, p  # hard safety filter
-    if apply_gate and not (p_gate_low < p < p_gate_high):
-        return -1e9, p
+def nearest_level_index(levels: np.ndarray, value: float) -> int:
+    levels = np.asarray(levels, dtype=float)
+    if levels.size == 0:
+        return 0
+    return int(np.argmin(np.abs(levels - value)))
 
-    # effort: normalize squared error to [0, 1]
-    # max error is (0 - p_star)^2 = p_star^2
-    eff_raw = (p - p_star)**2
-    eff_normalized = 1.0 - eff_raw / (p_star**2)  # 1 = perfect match, 0 = worst
 
-    # variability bonus: normalize to [0, 1] using theoretical bounds
-    # With Laplace smoothing: freq = (count + 1) / (total + 25)
-    # Theoretical max: -log(1/(total+25)) = log(total+25)
-    # Theoretical min: -log(1) = 0
-    total = counts_5x5.sum()
-    var_raw = rarity_bonus(counts_5x5, d, t)
-    var_max = math.log(total + 25) if total > 0 else math.log(25)
-    var_normalized = var_raw / (var_max + 1e-9)  # 1 = maximally rare bin
+def dt_bin_from_patient_levels(patient: PatientModel, d_sys: float, t_sys: float):
+    d_idx = nearest_level_index(patient.d_levels, d_sys)
+    t_idx = nearest_level_index(patient.t_levels, t_sys)
+    return d_idx, t_idx
 
-    # Centered features in [-1, 1] let learned weights drift positive or negative.
-    d_norm = (d - D_MIN) / (D_MAX - D_MIN + 1e-12)
-    t_norm = (t - T_MIN) / (T_MAX - T_MIN + 1e-12)
-    rom_feature = 2.0 * d_norm - 1.0
-    time_feature = 2.0 * t_norm - 1.0
-    smooth = smooth_penalty(d, t, d_prev, t_prev)
 
-    score = (
-        w_eff * eff_normalized
-        + w_var * var_normalized
-        + w_rom * rom_feature
-        + w_time * time_feature
-        - w_smooth * smooth
-    )
+def wr_from_bin_stats(
+    d_idx: int,
+    t_idx: int,
+    *,
+    hit_counts: np.ndarray,
+    miss_counts: np.ndarray,
+    sum_t_ratio_hit: np.ndarray,
+    sum_d_ratio_miss: np.ndarray,
+    alpha_hit: float = 1.0,
+    beta_hit: float = 1.0,
+    t_ratio_prior: float = 0.5,
+    d_ratio_prior: float = 0.5,
+):
+    n_hit = float(hit_counts[d_idx, t_idx])
+    n_miss = float(miss_counts[d_idx, t_idx])
 
-    return score, p
+    p_hit = (n_hit + alpha_hit) / (n_hit + n_miss + alpha_hit + beta_hit)
+    mu_t_hit = (sum_t_ratio_hit[d_idx, t_idx] + t_ratio_prior) / (n_hit + 1.0)
+    mu_d_miss = (sum_d_ratio_miss[d_idx, t_idx] + d_ratio_prior) / (n_miss + 1.0)
+    mu_t_hit = float(np.clip(mu_t_hit, 0.0, 1.0))
+    mu_d_miss = float(np.clip(mu_d_miss, 0.0, 1.0))
+
+    # Expected deficit:
+    #   W = p_hit * E[t_ratio | hit] + (1-p_hit) * E[1-d_ratio | miss]
+    wr = p_hit * mu_t_hit + (1.0 - p_hit) * (1.0 - mu_d_miss)
+    return float(np.clip(wr, 0.0, 1.0))
 
 
 # ----------------------------
@@ -184,18 +170,20 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
     p_star = 0.70         # desired hit probability
     p_min = 0.10          # safety: don't choose near-impossible tasks
     p_gate_low = 0.5
-    p_gate_high = 0.7
+    p_gate_high = 0.8
 
-    # Adaptive preference weights: neutral start (no initial preference).
-    w_rom = 0.0
-    w_time = 0.0
-    eta_pref = 0.03
-    pref_decay = 0.001
-    w_abs_max = 2.0
-    reward_baseline = 0.0
-    baseline_alpha = 0.05
+    # Stage-2 sampling schedule:
+    # start near-uniform random, then transition toward Wr-biased sampling.
+    bias_warmup_trials = 250
+    softmax_tau = 6.0
 
     counts_5x5 = np.zeros((5, 5), dtype=int)
+    n_d_bins = len(np.asarray(patient.d_levels))
+    n_t_bins = len(np.asarray(patient.t_levels))
+    hit_counts = np.zeros((n_d_bins, n_t_bins), dtype=int)
+    miss_counts = np.zeros((n_d_bins, n_t_bins), dtype=int)
+    sum_t_ratio_hit = np.zeros((n_d_bins, n_t_bins), dtype=float)
+    sum_d_ratio_miss = np.zeros((n_d_bins, n_t_bins), dtype=float)
 
     d_prev, t_prev = None, None
     previous_hit = True
@@ -205,7 +193,8 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
         "d": [], "t": [], "v_req": [], "p_pred": [],
         "hit": [], "time_ratio": [], "dist_ratio": [],
         "v_hat": [], "sigma_v": [], "score": [], "direction": [],
-        "w_rom": [], "w_time": [], "reward": [], "reward_baseline": []
+        "w_rom": [], "w_time": [], "reward": [], "reward_baseline": [],
+        "wr": [], "bias_lambda": [], "dt_bin_d": [], "dt_bin_t": []
     }
 
     for k in range(n_trials):
@@ -217,58 +206,72 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
         # direction = rng.integers(0, N_DIRECTIONS)
         p_dir = float(dir_samples[direction])
 
-        # choose best candidate on lattice (for chosen direction)
-        best = None
-        best_score = -1e18
-        best_p = None
-
+        # ----------------------------
+        # Stage 1: gateway by hit probability only
+        # ----------------------------
+        gateway_candidates = []
+        feasible_candidates = []
         for (d, t, cand_dir) in CANDIDATES:
             if int(cand_dir) != direction:
                 continue
-            sc, p = score_candidate(
-                d, t,
-                v_hat=v_hat, sigma_v=sigma_v,
-                p_dir=p_dir,
-                p_star=p_star,
-                counts_5x5=counts_5x5,
-                d_prev=d_prev, t_prev=t_prev,
-                w_eff=1.0, w_var=0.40, w_smooth=0.40,
-                w_rom=w_rom, w_time=w_time,
-                p_gate_low=p_gate_low, p_gate_high=p_gate_high,
-                apply_gate=True,
-                p_min=p_min,
-                patient=patient
-            )
-            if sc > best_score:
-                best_score = sc
-                best = (float(d), float(t))
-                best_p = p
+            p_dt = p_hit_from_speed(d, t, v_hat, sigma_v)
+            p = combine_hit_probs_odds(p_dt, p_dir)
+            if p < p_min:
+                continue
+            cand = (float(d), float(t), float(p))
+            feasible_candidates.append(cand)
+            if p_gate_low < p < p_gate_high:
+                gateway_candidates.append(cand)
 
-        # Fallback: if no candidate in the gated band, choose best feasible candidate.
-        if best is None:
-            best_score = -1e18
-            for (d, t, cand_dir) in CANDIDATES:
-                if int(cand_dir) != direction:
-                    continue
-                sc, p = score_candidate(
-                    d, t,
-                    v_hat=v_hat, sigma_v=sigma_v,
-                    p_dir=p_dir,
-                    p_star=p_star,
-                    counts_5x5=counts_5x5,
-                    d_prev=d_prev, t_prev=t_prev,
-                    w_eff=1.0, w_var=0.40, w_smooth=0.40,
-                    w_rom=w_rom, w_time=w_time,
-                    apply_gate=False,
-                    p_min=p_min,
-                    patient=patient
+        if len(gateway_candidates) > 0:
+            candidate_pool = gateway_candidates
+        else:
+            candidate_pool = feasible_candidates
+
+        if len(candidate_pool) == 0:
+            # Safety fallback: choose closest to p_min among direction candidates.
+            # This should be rare and only occurs if model estimate is overly pessimistic.
+            all_dir = [(float(d), float(t)) for (d, t, cand_dir) in CANDIDATES if int(cand_dir) == direction]
+            d_sys, t_sys = all_dir[int(rng.integers(0, len(all_dir)))]
+            best_p = p_min
+            best_score = 0.0
+            chosen_wr = 0.0
+            chosen_bin = dt_bin_from_patient_levels(patient, d_sys, t_sys)
+            bias_lambda = 0.0
+        else:
+            # ----------------------------
+            # Stage 2: Wr scoring by (d,t)-bin and biased sampling
+            # ----------------------------
+            wr_vals = []
+            for (d, t, _) in candidate_pool:
+                d_idx, t_idx = dt_bin_from_patient_levels(patient, d, t)
+                wr_vals.append(
+                    wr_from_bin_stats(
+                        d_idx,
+                        t_idx,
+                        hit_counts=hit_counts,
+                        miss_counts=miss_counts,
+                        sum_t_ratio_hit=sum_t_ratio_hit,
+                        sum_d_ratio_miss=sum_d_ratio_miss,
+                    )
                 )
-                if sc > best_score:
-                    best_score = sc
-                    best = (float(d), float(t))
-                    best_p = p
+            wr_arr = np.asarray(wr_vals, dtype=float)
+            n_pool = len(candidate_pool)
 
-        d_sys, t_sys = best
+            # 0 -> random uniform, 1 -> fully Wr-biased
+            bias_lambda = float(min(1.0, k / max(1.0, float(bias_warmup_trials))))
+            wr_logits = softmax_tau * (wr_arr - np.max(wr_arr))
+            wr_probs = np.exp(wr_logits)
+            wr_probs /= np.sum(wr_probs)
+            pick_probs = (1.0 - bias_lambda) * (np.ones(n_pool) / n_pool) + bias_lambda * wr_probs
+            pick_probs = pick_probs / np.sum(pick_probs)
+
+            pick_idx = int(rng.choice(n_pool, p=pick_probs))
+            d_sys, t_sys, best_p = candidate_pool[pick_idx]
+            chosen_wr = float(wr_arr[pick_idx])
+            chosen_bin = dt_bin_from_patient_levels(patient, d_sys, t_sys)
+            best_score = chosen_wr
+
         v_req = d_sys / max(t_sys, 1e-9)
 
         # update variability counts using the chosen bin
@@ -306,25 +309,20 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
         if len(v_patient) >= 2:
             sigma_v = float(np.std(v_patient, ddof=1))
 
-        # Reward and adaptive drift of preference weights.
-        d_norm = (d_sys - D_MIN) / (D_MAX - D_MIN + 1e-12)
-        t_norm = (t_sys - T_MIN) / (T_MAX - T_MIN + 1e-12)
-        rom_feature = 2.0 * d_norm - 1.0
-        time_feature = 2.0 * t_norm - 1.0
+        # Update Wr stats in the selected (d,t) bin.
+        d_idx, t_idx = chosen_bin
+        if hit:
+            hit_counts[d_idx, t_idx] += 1
+            sum_t_ratio_hit[d_idx, t_idx] += float(outcome["time_ratio"])
+        else:
+            miss_counts[d_idx, t_idx] += 1
+            sum_d_ratio_miss[d_idx, t_idx] += float(outcome["dist_ratio"])
 
-        # Reward balances success and quality of execution.
-        reward = (
-            1.0 * float(hit)
-            + 0.25 * float(outcome["dist_ratio"])
-            + 0.25 * (1.0 - abs(float(best_p) - p_star))
-        )
-        reward_baseline = (1.0 - baseline_alpha) * reward_baseline + baseline_alpha * reward
-        advantage = reward - reward_baseline
-
-        w_rom = (1.0 - pref_decay) * w_rom + eta_pref * advantage * rom_feature
-        w_time = (1.0 - pref_decay) * w_time + eta_pref * advantage * time_feature
-        w_rom = float(np.clip(w_rom, -w_abs_max, w_abs_max))
-        w_time = float(np.clip(w_time, -w_abs_max, w_abs_max))
+        # Legacy fields retained for compatibility with existing plotting code.
+        w_rom = 0.0
+        w_time = 0.0
+        reward = chosen_wr
+        reward_baseline = chosen_wr
 
         # log
         hist["d"].append(d_sys)
@@ -342,6 +340,10 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7):
         hist["w_time"].append(w_time)
         hist["reward"].append(reward)
         hist["reward_baseline"].append(reward_baseline)
+        hist["wr"].append(chosen_wr)
+        hist["bias_lambda"].append(bias_lambda)
+        hist["dt_bin_d"].append(int(d_idx))
+        hist["dt_bin_t"].append(int(t_idx))
 
         d_prev, t_prev = d_sys, t_sys
 

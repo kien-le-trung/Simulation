@@ -23,7 +23,7 @@ PatientModel = patient_sim.PatientModel
 D_MIN, D_MAX = 0.10, 0.80
 T_MIN, T_MAX = 1.0, 7.0
 DIR_MIN, DIR_MAX = 0, 7
-N_DIRECTIONS = 8
+N_DIRECTIONS = 9
 
 # ----------------------------
 # QUEST+ helpers
@@ -126,6 +126,18 @@ def level5(x, xmin, xmax):
 def bin25(d, t):
     return (level5(d, D_MIN, D_MAX), level5(t, T_MIN, T_MAX))  # (dist_level, time_level)
 
+
+def apply_calibration_priors(patient: PatientModel, calibration_result: dict | None):
+    if not calibration_result:
+        return
+    per_direction = calibration_result.get("per_direction", {})
+    for direction, stats in per_direction.items():
+        idx = int(np.clip(direction, 0, 8))
+        n_reached = float(stats.get("n_reached", 0))
+        n_censored = float(stats.get("n_censored", 0))
+        patient.spatial_success_alpha[idx] += n_reached
+        patient.spatial_success_beta[idx] += n_censored
+
 # ----------------------------
 # QUEST+ main
 # ----------------------------
@@ -144,6 +156,7 @@ def run_quest_plus_dt(
     b1_grid=None,
     b2_grid=None,
     b3_grid=None,
+    calibration=True,
 ):
     """
     QUEST+ loop:
@@ -157,6 +170,10 @@ def run_quest_plus_dt(
     rng = np.random.default_rng(seed)
 
     counts = np.zeros((5, 5), dtype=int)
+
+    if calibration:
+        calibration_result = patient.calibration()
+        apply_calibration_priors(patient, calibration_result)
 
     # default grids (keep modest to avoid huge compute)
     if d_grid is None:
