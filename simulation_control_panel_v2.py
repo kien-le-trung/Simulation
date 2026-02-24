@@ -11,7 +11,7 @@ BASE_DIR = Path(__file__).resolve().parent
 PATIENT_PROFILES = {
     "overall_weak": {
         "k_d0_per_sec": 0.20,
-        "k_d_decay": 4.0,
+        "k_d_decay": 3.0,
         "v_sigma0": 0.06,
         "v_sigma_growth": 0.04,
         # 3x3 map flattened by idx = elevation * 3 + azimuth
@@ -36,7 +36,7 @@ PATIENT_PROFILES = {
 
     "highspeed_lowrom": {
         "k_d0_per_sec": 0.70,
-        "k_d_decay": 4.0,
+        "k_d_decay": 3.0,
         "v_sigma0": 0.03,
         "v_sigma_growth": 0.01,
         "spatial_strength_map": [1.0] * 9,

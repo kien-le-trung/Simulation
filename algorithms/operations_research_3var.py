@@ -20,8 +20,8 @@ PatientModel = patient_mod.PatientModel
 # ----------------------------
 # Candidate lattice (d,t,dir)
 # ----------------------------
-D_MIN, D_MAX = 0.10, 0.80
-T_MIN, T_MAX = 1.0, 7.0
+D_MIN, D_MAX = 0.05, 0.80
+T_MIN, T_MAX = 0.5, 7.0
 
 # resolution (tune for speed vs granularity)
 D_STEP = 0.05   # meters
@@ -139,23 +139,113 @@ def apply_calibration_priors(patient: PatientModel, calibration_result: dict | N
         patient.spatial_success_beta[idx] += n_censored
 
 
+def make_rom_state(*, n_directions: int = N_DIRECTIONS, d_min: float = D_MIN, d_max: float = D_MAX, n_bins: int = 12):
+    edges = np.linspace(float(d_min), float(d_max), int(n_bins) + 1)
+    shape = (int(n_directions), int(n_bins))
+    return {
+        "distance_edges": edges,
+        "hit_counts": np.zeros(shape, dtype=float),
+        "miss_counts": np.zeros(shape, dtype=float),
+        "sum_dist_ratio_on_miss": np.zeros(shape, dtype=float),
+    }
+
+
+def rom_bin_index(d_sys: float, distance_edges: np.ndarray) -> int:
+    idx = int(np.searchsorted(distance_edges, float(d_sys), side="right") - 1)
+    return int(np.clip(idx, 0, len(distance_edges) - 2))
+
+
+def update_rom_state(rom_state: dict, *, direction: int, d_sys: float, hit: bool, dist_ratio: float):
+    d_edges = np.asarray(rom_state["distance_edges"], dtype=float)
+    b = rom_bin_index(d_sys, d_edges)
+    direction = int(np.clip(direction, 0, rom_state["hit_counts"].shape[0] - 1))
+    if hit:
+        rom_state["hit_counts"][direction, b] += 1.0
+    else:
+        rom_state["miss_counts"][direction, b] += 1.0
+        rom_state["sum_dist_ratio_on_miss"][direction, b] += float(np.clip(dist_ratio, 0.0, 1.0))
+
+
+def rom_penalty_term(
+    d_sys: float,
+    direction: int,
+    *,
+    rom_state: dict | None,
+    trial_index: int,
+    warmup_trials: int = 40,
+    w_rom: float = 0.45,
+    tau_d: float = 0.05,
+    boundary_threshold: float = 0.35,
+):
+    # Return additive objective penalty learned from miss patterns at larger distances.
+    # No oracle max-reach is used; this is derived only from observed trial outcomes.
+    if rom_state is None:
+        return 0.0, 0.0, 0.0, float(D_MAX)
+
+    hit_counts = np.asarray(rom_state["hit_counts"], dtype=float)
+    miss_counts = np.asarray(rom_state["miss_counts"], dtype=float)
+    miss_ratio_sum = np.asarray(rom_state["sum_dist_ratio_on_miss"], dtype=float)
+    d_edges = np.asarray(rom_state["distance_edges"], dtype=float)
+    d_centers = 0.5 * (d_edges[:-1] + d_edges[1:])
+
+    direction = int(np.clip(direction, 0, hit_counts.shape[0] - 1))
+    h = hit_counts[direction]
+    m = miss_counts[direction]
+    miss_ratio_sum_dir = miss_ratio_sum[direction]
+    n = h + m
+
+    miss_rate = (m + 1.0) / (n + 2.0)
+    miss_severity = (m - miss_ratio_sum_dir + 1.0) / (m + 2.0)
+    rom_evidence = miss_rate * miss_severity
+    support = np.clip(n / 8.0, 0.0, 1.0)
+    weighted_evidence = rom_evidence * support
+
+    if np.any(weighted_evidence > boundary_threshold):
+        boundary_idx = int(np.argmax(weighted_evidence > boundary_threshold))
+        d_boundary = float(d_centers[boundary_idx])
+    else:
+        # If no boundary is discovered yet, keep penalty weak at long distances only.
+        d_boundary = float(d_edges[-1])
+
+    dist_risk = 1.0 / (1.0 + math.exp(-(float(d_sys) - d_boundary) / max(float(tau_d), 1e-6)))
+    dir_conf = float(np.clip(np.sum(n) / 24.0, 0.0, 1.0))
+    warmup = float(np.clip(float(trial_index) / max(float(warmup_trials), 1.0), 0.0, 1.0))
+    tail_mask = d_centers >= float(d_sys)
+    if np.any(tail_mask):
+        tail_severity = float(np.mean(weighted_evidence[tail_mask]))
+    else:
+        tail_severity = float(np.mean(weighted_evidence))
+    tail_severity = float(np.clip(tail_severity, 0.0, 1.0))
+
+    risk = float(np.clip(dist_risk * dir_conf * max(tail_severity, 0.25), 0.0, 1.0))
+    penalty = float(w_rom * warmup * risk)
+    return penalty, risk, dir_conf, d_boundary
+
+
 # ----------------------------
 # OR Objective: score(d,t)
 # ----------------------------
 def score_candidate(d, t, *,
                     v_hat, sigma_v,
                     p_dir,
+                    cand_direction: int,
                     p_star,
                     counts_5x5,
                     w_eff=1.0, w_var=0.20,
                     p_min=0.10,
-                    patient: PatientModel):
+                    patient: PatientModel,
+                    rom_state: dict | None = None,
+                    trial_index: int = 0,
+                    rom_warmup_trials: int = 40,
+                    w_rom: float = 0.45,
+                    rom_tau_d: float = 0.05,
+                    rom_boundary_threshold: float = 0.35):
     # effort: keep predicted hit prob near p_star (hard but doable)
     p_dt = p_hit_from_speed(d, t, v_hat, sigma_v)
     p = combine_hit_probs_odds(p_dt, p_dir)
 
     if p < p_min:
-        return -1e9, p  # hard safety filter
+        return -1e9, p, 0.0, 0.0, 0.0, float(D_MAX)  # hard safety filter
 
     # effort: normalize squared error to [0, 1]
     # max error is (0 - p_star)^2 = p_star^2
@@ -172,10 +262,21 @@ def score_candidate(d, t, *,
     var_normalized = var_raw / (var_max + 1e-9)  # 1 = maximally rare bin
 
     score = w_eff * eff_normalized + w_var * var_normalized
+    rom_penalty, rom_risk, rom_confidence, rom_boundary = rom_penalty_term(
+        d,
+        cand_direction,
+        rom_state=rom_state,
+        trial_index=trial_index,
+        warmup_trials=rom_warmup_trials,
+        w_rom=w_rom,
+        tau_d=rom_tau_d,
+        boundary_threshold=rom_boundary_threshold,
+    )
+    score = score - rom_penalty
 
     """Interestingly, adding the rom and speed score does not really change the overall behavior much, but it gives prioritize to  higher d and t"""
 
-    return score, p
+    return score, p, rom_penalty, rom_risk, rom_confidence, rom_boundary
 
 
 # ----------------------------
@@ -226,8 +327,10 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7, ema_alpha=0.10, calib
     hist = {
         "d": [], "t": [], "v_req": [], "p_pred": [],
         "hit": [], "time_ratio": [], "dist_ratio": [],
-        "v_hat": [], "sigma_v": [], "score": [], "direction": []
+        "v_hat": [], "sigma_v": [], "score": [], "direction": [],
+        "rom_penalty": [], "rom_risk": [], "rom_confidence": [], "rom_boundary": []
     }
+    rom_state = make_rom_state()
 
     for k in range(n_trials):
 
@@ -241,17 +344,28 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7, ema_alpha=0.10, calib
         best = None
         best_score = -1e18
         best_p = None
+        best_rom_penalty = 0.0
+        best_rom_risk = 0.0
+        best_rom_conf = 0.0
+        best_rom_boundary = float(D_MAX)
 
         for (d, t, cand_dir) in CANDIDATES:
             cand_direction = int(cand_dir)
-            sc, p = score_candidate(
+            sc, p, rom_penalty, rom_risk, rom_conf, rom_boundary = score_candidate(
                 d, t,
                 v_hat=v_hat, sigma_v=sigma_v,
                 p_dir=float(dir_modes[cand_direction]),
+                cand_direction=cand_direction,
                 p_star=p_star,
                 counts_5x5=counts_5x5,
                 w_eff=1.0, w_var=0.25,
                 p_min=p_min,
+                rom_state=rom_state,
+                trial_index=k,
+                rom_warmup_trials=40,
+                w_rom=0.45,
+                rom_tau_d=0.05,
+                rom_boundary_threshold=0.35,
                 patient=patient
             )
 
@@ -259,6 +373,10 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7, ema_alpha=0.10, calib
                 best_score = sc
                 best = (float(d), float(t), cand_direction)
                 best_p = p
+                best_rom_penalty = float(rom_penalty)
+                best_rom_risk = float(rom_risk)
+                best_rom_conf = float(rom_conf)
+                best_rom_boundary = float(rom_boundary)
 
         d_sys, t_sys, direction = best
         v_req = d_sys / max(t_sys, 1e-9)
@@ -278,6 +396,13 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7, ema_alpha=0.10, calib
             patient.spatial_success_alpha[direction] += 1.0
         else:
             patient.spatial_success_beta[direction] += 1.0
+        update_rom_state(
+            rom_state,
+            direction=direction,
+            d_sys=d_sys,
+            hit=hit,
+            dist_ratio=float(outcome["dist_ratio"]),
+        )
 
         # online learning update: separate speed tracking for hits vs misses
         # calculate v_obs = d_patient / t_patient from outcome
@@ -289,7 +414,7 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7, ema_alpha=0.10, calib
             v_obs_hit = d_pat / max(t_pat, 1e-6)
             v_obs = v_obs_hit
         else:
-            # On misses: use distance achieved over time allowed (not t_pat)
+            #On misses: use distance achieved over time allowed (not t_pat)
             v_obs_miss = d_pat / max(t_sys, 1e-6)
             v_obs = v_obs_miss
 
@@ -310,6 +435,10 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7, ema_alpha=0.10, calib
         hist["sigma_v"].append(sigma_v)
         hist["score"].append(best_score)
         hist["direction"].append(direction)
+        hist["rom_penalty"].append(best_rom_penalty)
+        hist["rom_risk"].append(best_rom_risk)
+        hist["rom_confidence"].append(best_rom_conf)
+        hist["rom_boundary"].append(best_rom_boundary)
 
         d_prev, t_prev = d_sys, t_sys
 
