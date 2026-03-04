@@ -374,6 +374,7 @@ def run_sim(
         "u": [],
         "d": [],
         "t": [],
+        "direction": [],
         "hit": [],
         "time_ratio": [],
         "dist_ratio": [],
@@ -426,12 +427,14 @@ def run_sim(
 
         # distance_level for the simulator
         lvl = distance_level_3(d_sys, dmin, dmax)
+        direction = int(rng.integers(0, 5))
 
         outcome = patient.sample_trial(
             t_sys=t_sys,
             d_sys=d_sys,
             distance_level=lvl,
             previous_hit=previous_hit,
+            direction_bin=direction,
         )
 
         hit = bool(outcome["hit"])
@@ -465,6 +468,7 @@ def run_sim(
         hist["u"].append(ctrl.u)
         hist["d"].append(d_sys)
         hist["t"].append(t_sys)
+        hist["direction"].append(direction)
         hist["hit"].append(int(hit))
         hist["time_ratio"].append(time_ratio)
         hist["dist_ratio"].append(dist_ratio)

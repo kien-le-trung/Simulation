@@ -119,18 +119,122 @@ def expand_bounds_if_needed(d_min, d_max, observed_speeds, t_fixed):
     return d_min, d_max, changed
 
 
+def make_rom_state(*, d_min: float = D_MIN, d_max: float = D_MAX, n_bins: int = 12):
+    edges = np.linspace(float(d_min), float(d_max), int(n_bins) + 1)
+    shape = (int(n_bins),)
+    return {
+        "distance_edges": edges,
+        "hit_counts": np.zeros(shape, dtype=float),
+        "miss_counts": np.zeros(shape, dtype=float),
+        "sum_dist_ratio_on_miss": np.zeros(shape, dtype=float),
+    }
+
+
+def rom_bin_index(d_sys: float, distance_edges: np.ndarray) -> int:
+    idx = int(np.searchsorted(distance_edges, float(d_sys), side="right") - 1)
+    return int(np.clip(idx, 0, len(distance_edges) - 2))
+
+
+def update_rom_state(rom_state: dict, *, d_sys: float, hit: bool, dist_ratio: float):
+    d_edges = np.asarray(rom_state["distance_edges"], dtype=float)
+    b = rom_bin_index(d_sys, d_edges)
+    if hit:
+        rom_state["hit_counts"][b] += 1.0
+    else:
+        rom_state["miss_counts"][b] += 1.0
+        rom_state["sum_dist_ratio_on_miss"][b] += float(np.clip(dist_ratio, 0.0, 1.0))
+
+
+def rom_penalty_term(
+    d_sys: float,
+    *,
+    rom_state: dict | None,
+    trial_index: int,
+    warmup_trials: int = 40,
+    w_rom: float = 0.45,
+    tau_d: float = 0.05,
+    boundary_threshold: float = 0.35,
+):
+    # Return additive objective penalty learned from miss patterns at larger distances.
+    # No oracle max-reach is used; this is derived only from observed trial outcomes.
+    if rom_state is None:
+        return 0.0, 0.0, 0.0, float(D_MAX)
+
+    hit_counts = np.asarray(rom_state["hit_counts"], dtype=float)
+    miss_counts = np.asarray(rom_state["miss_counts"], dtype=float)
+    miss_ratio_sum = np.asarray(rom_state["sum_dist_ratio_on_miss"], dtype=float)
+    d_edges = np.asarray(rom_state["distance_edges"], dtype=float)
+    d_centers = 0.5 * (d_edges[:-1] + d_edges[1:])
+
+    h = hit_counts
+    m = miss_counts
+    n = h + m
+
+    miss_rate = (m + 1.0) / (n + 2.0)
+    miss_severity = (m - miss_ratio_sum + 1.0) / (m + 2.0)
+    rom_evidence = miss_rate * miss_severity
+    support = np.clip(n / 8.0, 0.0, 1.0)
+    weighted_evidence = rom_evidence * support
+
+    if np.any(weighted_evidence > boundary_threshold):
+        boundary_idx = int(np.argmax(weighted_evidence > boundary_threshold))
+        d_boundary = float(d_centers[boundary_idx])
+    else:
+        # If no boundary is discovered yet, keep penalty weak at long distances only.
+        d_boundary = float(d_edges[-1])
+
+    dist_risk = 1.0 / (1.0 + math.exp(-(float(d_sys) - d_boundary) / max(float(tau_d), 1e-6)))
+    conf = float(np.clip(np.sum(n) / 24.0, 0.0, 1.0))
+    warmup = float(np.clip(float(trial_index) / max(float(warmup_trials), 1.0), 0.0, 1.0))
+    tail_mask = d_centers >= float(d_sys)
+    if np.any(tail_mask):
+        tail_severity = float(np.mean(weighted_evidence[tail_mask]))
+    else:
+        tail_severity = float(np.mean(weighted_evidence))
+    tail_severity = float(np.clip(tail_severity, 0.0, 1.0))
+
+    risk = float(np.clip(dist_risk * conf * max(tail_severity, 0.25), 0.0, 1.0))
+    penalty = float(w_rom * warmup * risk)
+    return penalty, risk, conf, d_boundary
+
+
 # ----------------------------
 # Objective in speed domain
 # ----------------------------
-def score_speed_candidate(v_req, *, v_hat, sigma_v, p_star, p_min=0.05):
+def score_speed_candidate(
+    v_req,
+    *,
+    d_sys,
+    v_hat,
+    sigma_v,
+    p_star,
+    p_min=0.05,
+    rom_state: dict | None = None,
+    trial_index: int = 0,
+    rom_warmup_trials: int = 20,
+    w_rom: float = 0.45,
+    rom_tau_d: float = 0.05,
+    rom_boundary_threshold: float = 0.35,
+):
     p = p_hit_from_speed(v_req, v_hat, sigma_v)
 
     if p < p_min:
-        return -1e9, p
+        return -1e9, p, 0.0, 0.0, 0.0, float(D_MAX)
 
     eff_raw = (p - p_star) ** 2
     eff_normalized = 1.0 - eff_raw / (p_star ** 2)
-    return eff_normalized, p
+    score = eff_normalized
+    rom_penalty, rom_risk, rom_confidence, rom_boundary = rom_penalty_term(
+        d_sys,
+        rom_state=rom_state,
+        trial_index=trial_index,
+        warmup_trials=rom_warmup_trials,
+        w_rom=w_rom,
+        tau_d=rom_tau_d,
+        boundary_threshold=rom_boundary_threshold,
+    )
+    score = score - rom_penalty
+    return score, p, rom_penalty, rom_risk, rom_confidence, rom_boundary
 
 
 # ----------------------------
@@ -161,7 +265,6 @@ def run_sim(
         cur_d_min, cur_d_max = derive_bounds_from_calibration(calibration_result, patient)
 
     local_d_grid = np.round(np.arange(cur_d_min, cur_d_max + 1e-9, D_STEP), 4)
-    local_v_grid = local_d_grid / max(t_fixed, 1e-9)
 
     # Online speed model (EWMA + EW second moment).
     sigma_v_floor = 0.02
@@ -201,8 +304,13 @@ def run_sim(
         "v_hat": [],
         "sigma_v": [],
         "score": [],
+        "rom_penalty": [],
+        "rom_risk": [],
+        "rom_confidence": [],
+        "rom_boundary": [],
     }
     observed_speeds = []
+    rom_state = make_rom_state(d_min=cur_d_min, d_max=cur_d_max)
 
     for k in range(n_trials):
         if k > 0 and k % 50 == 0 and len(observed_speeds) >= 5:
@@ -215,26 +323,41 @@ def run_sim(
             if changed:
                 cur_d_min, cur_d_max = new_d_min, new_d_max
                 local_d_grid = np.round(np.arange(cur_d_min, cur_d_max + 1e-9, D_STEP), 4)
-                local_v_grid = local_d_grid / max(t_fixed, 1e-9)
 
-        best_v_req = None
+        best_d = None
         best_score = -1e18
         best_p = None
+        best_rom_penalty = 0.0
+        best_rom_risk = 0.0
+        best_rom_conf = 0.0
+        best_rom_boundary = float(D_MAX)
 
-        for v_req in local_v_grid:
-            sc, p = score_speed_candidate(
-                float(v_req),
+        for d_cand in local_d_grid:
+            v_req = float(d_cand) / max(t_fixed, 1e-9)
+            sc, p, rom_penalty, rom_risk, rom_conf, rom_boundary = score_speed_candidate(
+                v_req,
+                d_sys=float(d_cand),
                 v_hat=v_hat,
                 sigma_v=sigma_v,
                 p_star=p_star,
                 p_min=p_min,
+                rom_state=rom_state,
+                trial_index=k,
+                rom_warmup_trials=20,
+                w_rom=0.45,
+                rom_tau_d=0.05,
+                rom_boundary_threshold=0.35,
             )
             if sc > best_score:
                 best_score = sc
-                best_v_req = float(v_req)
+                best_d = float(d_cand)
                 best_p = p
+                best_rom_penalty = float(rom_penalty)
+                best_rom_risk = float(rom_risk)
+                best_rom_conf = float(rom_conf)
+                best_rom_boundary = float(rom_boundary)
 
-        d_sys = float(np.clip(best_v_req * t_fixed, cur_d_min, cur_d_max))
+        d_sys = float(np.clip(best_d, cur_d_min, cur_d_max))
         t_sys = t_fixed
 
         i = level5(d_sys, cur_d_min, cur_d_max)
@@ -250,6 +373,12 @@ def run_sim(
         )
         hit = bool(outcome["hit"])
         previous_hit = hit
+        update_rom_state(
+            rom_state,
+            d_sys=float(d_sys),
+            hit=hit,
+            dist_ratio=float(outcome["dist_ratio"]),
+        )
 
         d_pat = float(outcome["dist_ratio"]) * d_sys
         t_pat = float(outcome["t_pat"])
@@ -273,5 +402,9 @@ def run_sim(
         hist["v_hat"].append(float(v_hat))
         hist["sigma_v"].append(float(sigma_v))
         hist["score"].append(best_score)
+        hist["rom_penalty"].append(best_rom_penalty)
+        hist["rom_risk"].append(best_rom_risk)
+        hist["rom_confidence"].append(best_rom_conf)
+        hist["rom_boundary"].append(best_rom_boundary)
 
     return hist, counts_5x5, patient

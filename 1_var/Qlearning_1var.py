@@ -188,8 +188,11 @@ def run_sim(
     seed: int = 7,
     cfg: Optional[QLearningConfig] = None,
     calibration: bool = True,
+    t_fixed: Optional[float] = None,
 ):
     cfg = cfg or QLearningConfig()
+    if t_fixed is not None:
+        cfg.t_fixed = float(t_fixed)
     rng = np.random.default_rng(seed)
     patient = patient or PatientModel(seed=seed)
 

@@ -299,6 +299,7 @@ def run_controller(
         "a_j": [],
         "d": [],
         "t": [],
+        "direction": [],
         "d_sys": [],
         "t_sys": [],
         "p_pred": [],
@@ -373,11 +374,13 @@ def run_controller(
 
         # run patient trial
         lvl = distance_level_from_patient_bins(patient, d_sys)
+        direction = int(rng.integers(0, 5))
         out = patient.sample_trial(
             t_sys=t_sys,
             d_sys=d_sys,
             distance_level=lvl,
             previous_hit=prev_hit,
+            direction_bin=direction,
         )
         hit = bool(out["hit"])
         prev_hit = hit
@@ -406,6 +409,7 @@ def run_controller(
         hist["a_j"].append(j)
         hist["d"].append(d)
         hist["t"].append(t)
+        hist["direction"].append(direction)
         hist["d_sys"].append(d_sys)
         hist["t_sys"].append(t_sys)
         hist["p_pred"].append(float(p_pred_intended))

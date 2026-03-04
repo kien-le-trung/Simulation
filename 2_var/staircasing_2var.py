@@ -314,6 +314,7 @@ def run_sim(
         "trial": [],
         "d": [],
         "t": [],
+        "direction": [],
         "hit": [],
         "time_ratio": [],
         "dist_ratio": [],
@@ -334,12 +335,14 @@ def run_sim(
 
         d_sys, t_sys = controller.d, controller.t
         lvl = distance_level_from_patient_bins(patient, d_sys)
+        direction = int(rng.integers(0, 5))
 
         outcome = patient.sample_trial(
             t_sys=t_sys,
             d_sys=d_sys,
             distance_level=lvl,
             previous_hit=previous_hit,
+            direction_bin=direction,
         )
 
         hit = bool(outcome["hit"])
@@ -359,6 +362,7 @@ def run_sim(
         logs["trial"].append(k)
         logs["d"].append(float(d_sys))
         logs["t"].append(float(t_sys))
+        logs["direction"].append(direction)
         logs["hit"].append(int(hit))
         logs["time_ratio"].append(float(outcome["time_ratio"]))
         logs["dist_ratio"].append(float(outcome["dist_ratio"]))

@@ -418,6 +418,7 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7, ema_alpha=0.20, calib
     hist = {
         "d": [],
         "t": [],
+        "direction": [],
         "v_req": [],
         "p_pred": [],
         "hit": [],
@@ -495,13 +496,15 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7, ema_alpha=0.20, calib
         i, j = bin25(d_sys, t_sys, cur_d_min, cur_d_max, cur_t_min, cur_t_max)
         counts_5x5[i, j] += 1
 
-        # run the trial using your simulator (direction intentionally omitted)
+        # run the trial using your simulator with randomized direction
         lvl = distance_level_from_patient_bins(patient, d_sys)
+        direction = int(rng.integers(0, 5))
         outcome = patient.sample_trial(
             t_sys=t_sys,
             d_sys=d_sys,
             distance_level=lvl,
             previous_hit=previous_hit,
+            direction_bin=direction,
         )
         hit = bool(outcome["hit"])
         previous_hit = hit
@@ -532,6 +535,7 @@ def run_sim(patient: PatientModel, n_trials=10000, seed=7, ema_alpha=0.20, calib
         # log
         hist["d"].append(d_sys)
         hist["t"].append(t_sys)
+        hist["direction"].append(direction)
         hist["v_req"].append(v_req)
         hist["p_pred"].append(best_p)
         hist["hit"].append(int(hit))

@@ -61,24 +61,24 @@ class StaircaseController:
     def __init__(self, config: StaircaseConfig, d0: float = 0.30, t0: float = T_FIXED):
         self.cfg = config
         self.d = clamp(d0, self.cfg.d_min, self.cfg.d_max)
-        self.t = T_FIXED
+        self.t = clamp(float(t0), self.cfg.t_min, self.cfg.t_max)
         self.success_streak = 0
         self.fail_streak = 0
 
     def _quantize(self, d: float, t: float) -> Tuple[float, float]:
         d = round(d / self.cfg.quantize_d) * self.cfg.quantize_d
-        t = T_FIXED
+        t = clamp(float(t), self.cfg.t_min, self.cfg.t_max)
         return d, t
 
     def _make_harder(self) -> None:
         self.d += self.cfg.d_weight * self.cfg.d_step
         self.d = clamp(self.d, self.cfg.d_min, self.cfg.d_max)
-        self.d, self.t = self._quantize(self.d, T_FIXED)
+        self.d, self.t = self._quantize(self.d, self.t)
 
     def _make_easier(self) -> None:
         self.d -= self.cfg.d_weight * self.cfg.d_step
         self.d = clamp(self.d, self.cfg.d_min, self.cfg.d_max)
-        self.d, self.t = self._quantize(self.d, T_FIXED)
+        self.d, self.t = self._quantize(self.d, self.t)
 
     def update(self, hit: bool) -> Tuple[float, float, str]:
         if hit:
@@ -108,7 +108,7 @@ class StaircaseController:
         u = rng.uniform(0, 1)
         d = self.cfg.d_min + u * (self.cfg.d_max - self.cfg.d_min)
         d = round(d / self.cfg.d_step) * self.cfg.d_step
-        return float(d), float(T_FIXED)
+        return float(d), float(self.cfg.t_min)
 
 
 def distance_level_from_patient_bins(patient: PatientModel, d_sys: float) -> int:
@@ -129,7 +129,7 @@ def apply_calibration_priors(patient: PatientModel, calibration_result: dict | N
         patient.spatial_success_beta[idx] += n_censored
 
 
-def derive_bounds_from_calibration(calibration_result, patient):
+def derive_bounds_from_calibration(calibration_result, patient, t_fixed: float = T_FIXED):
     """
     Derive distance bounds from calibration data and keep time fixed at 5 s.
     """
@@ -138,7 +138,7 @@ def derive_bounds_from_calibration(calibration_result, patient):
     defaults = StaircaseConfig()
 
     if not calibration_result:
-        return defaults.d_min, defaults.d_max, T_FIXED, T_FIXED
+        return defaults.d_min, defaults.d_max, float(t_fixed), float(t_fixed)
 
     trials = calibration_result.get("trials", [])
     speeds = []
@@ -150,7 +150,7 @@ def derive_bounds_from_calibration(calibration_result, patient):
             speeds.append(d_sys / t_pat)
 
     if len(speeds) < 3:
-        return defaults.d_min, defaults.d_max, T_FIXED, T_FIXED
+        return defaults.d_min, defaults.d_max, float(t_fixed), float(t_fixed)
 
     d_max_cal = max(float(patient.max_reach), 0.20)
     d_min_cal = ABS_D_MIN
@@ -158,14 +158,14 @@ def derive_bounds_from_calibration(calibration_result, patient):
     if d_max_cal - d_min_cal < 0.15:
         d_max_cal = d_min_cal + 0.15
 
-    return float(d_min_cal), float(min(d_max_cal, ABS_D_MAX)), T_FIXED, T_FIXED
+    return float(d_min_cal), float(min(d_max_cal, ABS_D_MAX)), float(t_fixed), float(t_fixed)
 
 
-def expand_bounds_if_needed(d_min, d_max, t_min, t_max, observed_speeds):
+def expand_bounds_if_needed(d_min, d_max, t_min, t_max, observed_speeds, t_fixed: float = T_FIXED):
     """
     Time is fixed in 1-var mode. Keep bounds unchanged.
     """
-    return d_min, d_max, T_FIXED, T_FIXED, False
+    return d_min, d_max, float(t_fixed), float(t_fixed), False
 
 
 BIN_NAMES_5 = ["closest/shortest", "close/short", "medium", "far/long", "farthest/longest"]
@@ -203,9 +203,14 @@ def run_sim(
     seed: int = 7,
     d0: float = 0.30,
     t0: float = T_FIXED,
+    t_fixed: float | None = None,
     cfg: StaircaseConfig | None = None,
     calibration: bool = True,
 ) -> Dict[str, List]:
+    if t_fixed is None:
+        t_fixed = float(t0)
+    else:
+        t_fixed = float(t_fixed)
     calibration_result = None
     if calibration:
         calibration_result = patient.calibration()
@@ -213,19 +218,19 @@ def run_sim(
 
     if cfg is None:
         cal_d_min, cal_d_max, _cal_t_min, _cal_t_max = derive_bounds_from_calibration(
-            calibration_result, patient
+            calibration_result, patient, t_fixed=t_fixed
         )
         cfg = StaircaseConfig(
             d_min=cal_d_min,
             d_max=cal_d_max,
-            t_min=T_FIXED,
-            t_max=T_FIXED,
+            t_min=t_fixed,
+            t_max=t_fixed,
         )
     else:
-        cfg.t_min = T_FIXED
-        cfg.t_max = T_FIXED
+        cfg.t_min = t_fixed
+        cfg.t_max = t_fixed
 
-    controller = StaircaseController(cfg, d0=d0, t0=T_FIXED)
+    controller = StaircaseController(cfg, d0=d0, t0=t_fixed)
 
     logs: Dict[str, List] = {
         "trial": [],
@@ -244,14 +249,14 @@ def run_sim(
     for k in range(n_trials):
         if k > 0 and k % 50 == 0 and len(observed_speeds) >= 5:
             new_d_min, new_d_max, new_t_min, new_t_max, changed = expand_bounds_if_needed(
-                cfg.d_min, cfg.d_max, cfg.t_min, cfg.t_max, observed_speeds
+                cfg.d_min, cfg.d_max, cfg.t_min, cfg.t_max, observed_speeds, t_fixed=t_fixed
             )
             if changed:
                 cfg.d_min, cfg.d_max = new_d_min, new_d_max
                 cfg.t_min, cfg.t_max = new_t_min, new_t_max
 
-        d_sys, t_sys = controller.d, T_FIXED
-        controller.t = T_FIXED
+        d_sys, t_sys = controller.d, t_fixed
+        controller.t = t_fixed
         lvl = distance_level_from_patient_bins(patient, d_sys)
 
         outcome = patient.sample_trial(

@@ -16,13 +16,26 @@ def _load_module_from_path(module_name: str, module_path: Path):
     return module
 
 
+def _load_shared_patient_profiles():
+    module = _load_module_from_path(
+        "patient_profiles_shared",
+        BASE_DIR / "patient_profiles_shared.py",
+    )
+    return {k: dict(v) for k, v in module.PATIENT_PROFILES.items()}
+
+
 PATIENT_SIM_PATH = BASE_DIR / "patients" / "patient_simulation_v4.py"
 patient_mod = _load_module_from_path("patients.patient_simulation_v4", PATIENT_SIM_PATH)
 PatientModel = patient_mod.PatientModel
+VIS_PATH = BASE_DIR / "tests" / "visualization.py"
+viz_mod = _load_module_from_path("tests.visualization", VIS_PATH)
 
 D_MIN, D_MAX = 0.10, 0.80
 T_MIN, T_MAX = 1.0, 7.0
 N_DIRECTIONS = 9
+
+# Canonicalize profiles across 0/1/2/3 var panels.
+PATIENT_PROFILES = _load_shared_patient_profiles()
 
 
 def level5(x: float, xmin: float, xmax: float) -> int:
@@ -171,12 +184,104 @@ def plot_outputs(logs: dict, counts: np.ndarray, assets_dir: Path) -> None:
     plt.close(fig3)
 
 
+def plot_caterpillars_random_by_profile(
+    assets_dir: Path,
+    n_trials: int = 500,
+    seed: int = 7,
+) -> None:
+    profile_stats = {}
+    all_t_values = []
+    all_d_values = []
+    all_dir_values = []
+    algorithm_name = "random_0var"
+
+    for profile_name, params in PATIENT_PROFILES.items():
+        patient = PatientModel(**params)
+        logs, _counts = run_random_sim(patient=patient, n_trials=n_trials, seed=seed)
+
+        mean_t, std_t = viz_mod.average_time(logs)
+        mean_d, std_d = viz_mod.average_distance(logs)
+        mean_dir, std_dir = viz_mod.average_direction(logs)
+
+        profile_stats[profile_name] = {
+            "algorithm_names": [algorithm_name],
+            "means_time": [mean_t],
+            "std_time": [std_t],
+            "means_dist": [mean_d],
+            "std_dist": [std_d],
+            "means_dir": [mean_dir],
+            "std_dir": [std_dir],
+        }
+
+        all_t_values.extend(np.asarray(logs.get("t", []), dtype=float).tolist())
+        all_d_values.extend(np.asarray(logs.get("d", []), dtype=float).tolist())
+        all_dir_values.extend(
+            [viz_mod.DIR_INDEX_TO_ANGLE.get(int(d), float(d)) for d in logs.get("direction", [])]
+        )
+
+    time_xlim = (
+        float(np.min(all_t_values)),
+        float(np.max(all_t_values)),
+    ) if all_t_values else None
+    dist_xlim = (
+        float(np.min(all_d_values)),
+        float(np.max(all_d_values)),
+    ) if all_d_values else None
+    dir_xlim = (
+        float(np.min(all_dir_values)),
+        float(np.max(all_dir_values)),
+    ) if all_dir_values else None
+
+    viz_mod.plot_caterpillar_means_by_algorithm(
+        profile_stats=profile_stats,
+        title="0-var Random: Mean/SD by Patient Profile",
+        time_xlim=time_xlim,
+        dist_xlim=dist_xlim,
+        dir_xlim=dir_xlim,
+        save_path=assets_dir / "random_caterpillar_by_algorithm.png",
+        show=False,
+    )
+    viz_mod.plot_caterpillar_means_by_profile(
+        profile_stats=profile_stats,
+        title="0-var Random: Mean/SD by Patient Profile",
+        time_xlim=time_xlim,
+        dist_xlim=dist_xlim,
+        dir_xlim=dir_xlim,
+        save_path=assets_dir / "random_caterpillar_by_profile.png",
+        show=False,
+    )
+
+
+def plot_rolling_hit_rate_by_profile(
+    assets_dir: Path,
+    n_trials: int = 500,
+    seed: int = 7,
+    window: int = 50,
+) -> None:
+    hits_by_profile = {}
+    for profile_name, params in PATIENT_PROFILES.items():
+        patient = PatientModel(**params)
+        logs, _counts = run_random_sim(patient=patient, n_trials=n_trials, seed=seed)
+        hits_by_profile[profile_name] = logs.get("hit", [])
+
+    viz_mod.plot_rolling_hit_rate(
+        hit_series_by_algorithm=hits_by_profile,
+        window=window,
+        min_periods=1,
+        title="0-var Random Rolling Hit Rate by Patient Profile",
+        save_path=assets_dir / "random_rolling_hit_rate_by_profile.png",
+        show=False,
+    )
+
+
 def main() -> None:
     patient = PatientModel(seed=7)
     logs, counts = run_random_sim(patient=patient, n_trials=500, seed=7)
 
     assets_dir = BASE_DIR / "Assets" / "0_var"
     plot_outputs(logs, counts, assets_dir)
+    plot_caterpillars_random_by_profile(assets_dir=assets_dir, n_trials=500, seed=7)
+    plot_rolling_hit_rate_by_profile(assets_dir=assets_dir, n_trials=500, seed=7, window=50)
 
     hit_rate = float(np.mean(np.asarray(logs["hit"], dtype=float))) if logs["hit"] else float("nan")
     mean_t = float(np.mean(np.asarray(logs["t"], dtype=float))) if logs["t"] else float("nan")

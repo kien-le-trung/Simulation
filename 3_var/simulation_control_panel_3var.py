@@ -101,6 +101,18 @@ def _load_module_from_path(module_name, module_path):
     return module
 
 
+def _load_shared_patient_profiles():
+    module = _load_module_from_path(
+        "patient_profiles_shared",
+        BASE_DIR / "patient_profiles_shared.py",
+    )
+    return {k: dict(v) for k, v in module.PATIENT_PROFILES.items()}
+
+
+# Canonicalize profiles across 0/1/2/3 var panels.
+PATIENT_PROFILES = _load_shared_patient_profiles()
+
+
 def _load_patient_model():
     module_path = BASE_DIR / "patients" / "patient_simulation_v4.py"
     module = _load_module_from_path("patients.patient_simulation_v4", module_path)
@@ -281,9 +293,9 @@ if __name__ == "__main__":
     fig.savefig(patient_profiles_dir / "patient_rom_by_profile.png", dpi=150)
     plt.close(fig)
 
-    fig, _ = viz.plot_direction_by_profile(PATIENT_PROFILES, PatientModel)
-    fig.savefig(patient_profiles_dir / "patient_direction_profile.png", dpi=150)
-    plt.close(fig)
+    # fig, _ = viz.plot_direction_by_profile(PATIENT_PROFILES, PatientModel)
+    # fig.savefig(patient_profiles_dir / "patient_direction_profile.png", dpi=150)
+    # plt.close(fig)
 
     default_patient = PatientModel()
     time_xlim = (
@@ -305,9 +317,9 @@ if __name__ == "__main__":
         "operations_research_3var",
         "staircasing_3var",
         "logistic_online_3var_v2",
-        "QUEST_3var",
-        "Qlearning",
-        "hybrid_adaptive_3var",
+        # "QUEST_3var",
+        # "Qlearning",
+        # "hybrid_adaptive_3var",
     ]
 
     for patient_profile in PATIENT_PROFILES.keys():
@@ -415,6 +427,7 @@ if __name__ == "__main__":
     TARGET_HIT_RATE = 0.70
     CHECKPOINTS = [50, 100, 200]
     window = 50
+    
     # Track errors per checkpoint for column-level means
     # col_errors[algorithm][checkpoint] = list of errors across profiles
     col_errors = {a: {cp: [] for cp in CHECKPOINTS} for a in algorithms}

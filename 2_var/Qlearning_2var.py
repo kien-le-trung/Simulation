@@ -236,6 +236,7 @@ def run_sim(
         "trial": [],
         "d": [],
         "t": [],
+        "direction": [],
         "hit": [],
         "time_ratio": [],
         "dist_ratio": [],
@@ -255,6 +256,7 @@ def run_sim(
 
         action_idx = agent.select_action(mean_p)
         d_bin, t_bin, d_sys, t_sys = agent.action_to_values(action_idx)
+        direction = int(rng.integers(0, 5))
 
         lvl = distance_level_from_patient_bins(patient, d_sys)
         outcome = patient.sample_trial(
@@ -262,6 +264,7 @@ def run_sim(
             d_sys=d_sys,
             distance_level=lvl,
             previous_hit=previous_hit,
+            direction_bin=direction,
         )
 
         hit = int(bool(outcome["hit"]))
@@ -280,6 +283,7 @@ def run_sim(
         logs["trial"].append(k)
         logs["d"].append(float(d_sys))
         logs["t"].append(float(t_sys))
+        logs["direction"].append(direction)
         logs["hit"].append(int(hit))
         logs["time_ratio"].append(float(outcome["time_ratio"]))
         logs["dist_ratio"].append(float(outcome["dist_ratio"]))

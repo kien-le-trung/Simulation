@@ -263,6 +263,7 @@ def run_quest_plus_dt(
     hist = {
         "d": [],
         "t": [],
+        "direction": [],
         "p_pred": [],
         "EH": [],
         "hit": [],
@@ -304,7 +305,14 @@ def run_quest_plus_dt(
 
         # 3) Query patient simulator
         lvl = map_distance_level(patient, d_sys)
-        out = patient.sample_trial(t_sys=t_sys, d_sys=d_sys, distance_level=lvl, previous_hit=prev_hit)
+        direction = int(rng.integers(0, 5))
+        out = patient.sample_trial(
+            t_sys=t_sys,
+            d_sys=d_sys,
+            distance_level=lvl,
+            previous_hit=prev_hit,
+            direction_bin=direction,
+        )
         hit = bool(out["hit"])
         prev_hit = hit
 
@@ -317,6 +325,7 @@ def run_quest_plus_dt(
         # 5) Log
         hist["d"].append(d_sys)
         hist["t"].append(t_sys)
+        hist["direction"].append(direction)
         hist["p_pred"].append(p_pred_best)
         hist["EH"].append(EH_best)
         hist["hit"].append(int(hit))
