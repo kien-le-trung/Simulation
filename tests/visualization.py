@@ -298,6 +298,169 @@ def plot_rolling_hit_rate(
     ax.legend()
     fig.tight_layout()
     _finalize_figure(fig, save_path=save_path, show=show)
+
+
+def plot_hit_rate_matrix(
+    all_hits_by_profile,
+    algorithms,
+    window=50,
+    min_periods=1,
+    title="Rolling Hit Rate Matrix",
+    save_path=None,
+    show=True,
+):
+    """
+    Plot rolling hit-rate matrix where rows are profiles and columns are algorithms.
+    Input:
+      - all_hits_by_profile: {"profile_name": {"algorithm_name": [hits...]}}
+      - algorithms: ordered list of algorithm names to use as columns
+    """
+    if not isinstance(all_hits_by_profile, dict) or len(all_hits_by_profile) == 0:
+        raise ValueError("all_hits_by_profile must be a non-empty dict")
+    if not isinstance(algorithms, (list, tuple)) or len(algorithms) == 0:
+        raise ValueError("algorithms must be a non-empty list/tuple")
+
+    profile_names = list(all_hits_by_profile.keys())
+    n_profiles = len(profile_names)
+    n_algorithms = len(algorithms)
+
+    fig, axes = plt.subplots(
+        n_profiles,
+        n_algorithms,
+        figsize=(4 * n_algorithms, 2.8 * n_profiles),
+        sharex=True,
+        sharey=True,
+        squeeze=False,
+    )
+
+    for row, profile_name in enumerate(profile_names):
+        for col, algorithm in enumerate(algorithms):
+            ax = axes[row, col]
+            hits = all_hits_by_profile[profile_name].get(algorithm, [])
+            rolling = rolling_hitting_rate(
+                {"hit": hits},
+                window=window,
+                min_periods=min_periods,
+            )
+            if rolling.size > 0:
+                ax.plot(rolling, linewidth=1.5)
+            ax.set_ylim(0.0, 1.0)
+            ax.grid(True, alpha=0.3)
+            if row == 0:
+                ax.set_title(str(algorithm), fontsize=9)
+            if col == 0:
+                ax.set_ylabel(str(profile_name), fontsize=9)
+            if row == n_profiles - 1:
+                ax.set_xlabel("Trial")
+
+    fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    _finalize_figure(fig, save_path=save_path, show=show)
+
+
+def plot_counts_matrix(
+    all_counts_by_profile,
+    algorithms,
+    xlabels=None,
+    ylabels=None,
+    title="Counts Matrix",
+    save_path=None,
+    show=True,
+    annotate=True,
+):
+    """
+    Plot a matrix of count heatmaps where:
+      - rows are patient profiles
+      - columns are algorithms
+      - each cell is a 2D counts-by-bin heatmap for that profile/algorithm
+
+    Input:
+      - all_counts_by_profile: {"profile_name": {"algorithm_name": 2D counts array}}
+      - algorithms: ordered list of algorithm names to use as columns
+    """
+    if not isinstance(all_counts_by_profile, dict) or len(all_counts_by_profile) == 0:
+        raise ValueError("all_counts_by_profile must be a non-empty dict")
+    if not isinstance(algorithms, (list, tuple)) or len(algorithms) == 0:
+        raise ValueError("algorithms must be a non-empty list/tuple")
+
+    profile_names = list(all_counts_by_profile.keys())
+    n_profiles = len(profile_names)
+    n_algorithms = len(algorithms)
+
+    sample = None
+    for profile_name in profile_names:
+        for algorithm in algorithms:
+            mat = all_counts_by_profile.get(profile_name, {}).get(algorithm, None)
+            if mat is not None:
+                arr = np.asarray(mat)
+                if arr.ndim == 2 and arr.size > 0:
+                    sample = arr
+                    break
+        if sample is not None:
+            break
+    if sample is None:
+        raise ValueError("No valid 2D counts matrices found in all_counts_by_profile")
+
+    n_rows, n_cols = sample.shape
+    if xlabels is None:
+        xlabels = [str(i) for i in range(n_cols)]
+    if ylabels is None:
+        ylabels = [str(i) for i in range(n_rows)]
+
+    vmax = 0.0
+    for profile_name in profile_names:
+        for algorithm in algorithms:
+            mat = all_counts_by_profile.get(profile_name, {}).get(algorithm, None)
+            if mat is None:
+                continue
+            arr = np.asarray(mat, dtype=float)
+            if arr.ndim != 2 or arr.size == 0:
+                continue
+            vmax = max(vmax, float(np.max(arr)))
+    vmax = max(vmax, 1.0)
+
+    fig, axes = plt.subplots(
+        n_profiles,
+        n_algorithms,
+        figsize=(3.2 * n_algorithms, 2.8 * n_profiles),
+        squeeze=False,
+    )
+
+    im_ref = None
+    for row, profile_name in enumerate(profile_names):
+        for col, algorithm in enumerate(algorithms):
+            ax = axes[row, col]
+            mat = all_counts_by_profile.get(profile_name, {}).get(algorithm, None)
+            if mat is None:
+                arr = np.zeros_like(sample, dtype=float)
+            else:
+                arr = np.asarray(mat, dtype=float)
+                if arr.shape != sample.shape:
+                    arr = np.zeros_like(sample, dtype=float)
+
+            im = ax.imshow(arr, aspect="auto", vmin=0.0, vmax=vmax)
+            im_ref = im
+
+            if row == 0:
+                ax.set_title(str(algorithm), fontsize=9)
+            if col == 0:
+                ax.set_ylabel(str(profile_name), fontsize=9)
+
+            ax.set_xticks(range(n_cols))
+            ax.set_yticks(range(n_rows))
+            ax.set_xticklabels(xlabels, fontsize=7, rotation=45, ha="right")
+            ax.set_yticklabels(ylabels, fontsize=7)
+
+            if annotate:
+                for i in range(n_rows):
+                    for j in range(n_cols):
+                        ax.text(j, i, str(int(round(arr[i, j]))), ha="center", va="center", fontsize=6)
+
+    if im_ref is not None:
+        fig.colorbar(im_ref, ax=axes.ravel().tolist(), shrink=0.85, pad=0.01)
+    fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    _finalize_figure(fig, save_path=save_path, show=show)
 def plot_caterpillar_means(
     algorithm_names,
     means_time,

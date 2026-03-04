@@ -1,0 +1,519 @@
+from __future__ import annotations
+"""
+Continuous-margin control for selecting (d,t) pairs.
+
+Key idea:
+- Convert each trial into a continuous "margin" m_k:
+    if HIT : m_k = 1 - time_ratio         (bigger = more comfortable)
+    if MISS: m_k = dist_ratio - 1         (closer to 0 = nearly hit; very negative = far miss)
+- Track EWMA of margin: m_hat
+- PI controller pushes a scalar difficulty u in [0,1]
+- Map u -> (d_sys, t_sys) via required speed + ROM ramp, with exploration + diversity
+
+Requires: patient_simulation_v2.py (your simulator)
+File reference: :contentReference[oaicite:0]{index=0}
+"""
+
+import math
+import numpy as np
+import importlib.util
+from pathlib import Path
+
+# ============================================================
+BASE_DIR = Path(__file__).resolve().parents[1]
+def _load_module_from_path(module_name, module_path):
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+PATIENT_SIM_PATH = BASE_DIR / "patients" / "patient_simulation_v4.py"
+patient_mod = _load_module_from_path("patients.patient_simulation_v4", PATIENT_SIM_PATH)
+PatientModel = patient_mod.PatientModel
+# ============================================================
+
+hit_margin = []
+miss_margin = []
+
+# ----------------------------
+# Helpers: bins + rolling stats
+# ----------------------------
+def rolling_mean(x, w=20):
+    x = np.asarray(x, dtype=float)
+    if len(x) < w:
+        return x
+    return np.convolve(x, np.ones(w) / w, mode="valid")
+
+
+def level5(x, xmin, xmax):
+    """Map x in [xmin,xmax] -> {0..4} by fifths."""
+    u = (x - xmin) / (xmax - xmin + 1e-12)
+    if u < 0.2: return 0
+    if u < 0.4: return 1
+    if u < 0.6: return 2
+    if u < 0.8: return 3
+    return 4
+
+
+def bin25(d, t, dmin, dmax, tmin, tmax):
+    return (level5(d, dmin, dmax), level5(t, tmin, tmax))
+
+
+def rarity_bonus(counts_5x5, i, j, eps=1e-12):
+    """-log(freq) with Laplace smoothing, higher for under-sampled bins."""
+    total = counts_5x5.sum()
+    freq = (counts_5x5[i, j] + 1.0) / (total + 25.0)
+    return -math.log(freq + eps)
+
+
+def distance_level_3(d, dmin, dmax):
+    """Map d to distance_level in {0,1,2} (your PatientModel clips to 0..2 anyway)."""
+    u = (d - dmin) / (dmax - dmin + 1e-12)
+    if u < 1/3: return 0
+    if u < 2/3: return 1
+    return 2
+
+
+def apply_calibration_priors(patient: PatientModel, calibration_result: dict | None):
+    if not calibration_result:
+        return
+    per_direction = calibration_result.get("per_direction", {})
+    for direction, stats in per_direction.items():
+        idx = int(np.clip(direction, 0, 4))
+        n_reached = float(stats.get("n_reached", 0))
+        n_censored = float(stats.get("n_censored", 0))
+        patient.spatial_success_alpha[idx] += n_reached
+        patient.spatial_success_beta[idx] += n_censored
+
+
+def derive_bounds_from_calibration(calibration_result, patient):
+    """
+    Derive generous (d_min, d_max, t_min, t_max, v_min, v_max) from calibration data.
+    Uses wide margins (2x) so the grid is never too confined.
+    Falls back to run_sim defaults if calibration data is insufficient.
+    """
+    ABS_D_MIN, ABS_D_MAX = 0.05, 1.5
+    ABS_T_MIN, ABS_T_MAX = 0.15, 15.0
+
+    FALLBACK = (0.10, 1.0, 0.3, 7.0, 0.10, 1.50)
+
+    if not calibration_result:
+        return FALLBACK
+
+    trials = calibration_result.get("trials", [])
+    speeds = []
+    for tr in trials:
+        hit = tr.get("hit", tr.get("reached", False))
+        t_pat = float(tr.get("t_pat_obs", tr.get("t_pat", 0)))
+        d_sys = float(tr.get("d_sys", 0))
+        if hit and t_pat > 0.01 and d_sys > 0.01:
+            speeds.append(d_sys / t_pat)
+
+    if len(speeds) < 3:
+        return FALLBACK
+
+    speeds = np.array(speeds)
+    v_slow = max(float(np.percentile(speeds, 10)), 0.01)
+    v_fast = max(float(np.percentile(speeds, 90)), v_slow * 1.5)
+
+    d_max_cal = max(float(patient.max_reach), 0.20)
+    d_min_cal = ABS_D_MIN
+
+    t_min_cal = max(ABS_T_MIN, d_min_cal / (v_fast * 2.0))
+    t_max_cal = min(ABS_T_MAX, (d_max_cal / v_slow) * 2.0)
+
+    # Speed bounds for difficulty mapping: generous margins
+    v_min_cal = max(0.01, v_slow * 0.5)
+    v_max_cal = v_fast * 2.0
+
+    if d_max_cal - d_min_cal < 0.15:
+        d_max_cal = d_min_cal + 0.15
+    if t_max_cal - t_min_cal < 1.0:
+        t_max_cal = t_min_cal + 1.0
+
+    return (float(d_min_cal), float(min(d_max_cal, ABS_D_MAX)),
+            float(t_min_cal), float(t_max_cal),
+            float(v_min_cal), float(v_max_cal))
+
+
+def expand_bounds_if_needed(d_min, d_max, t_min, t_max, v_min, v_max, observed_speeds):
+    """
+    Backup plan: if observed trial speeds suggest bounds are too tight, expand.
+    Never shrinks bounds. Returns (d_min, d_max, t_min, t_max, v_min, v_max, changed).
+    """
+    ABS_T_MIN, ABS_T_MAX = 0.15, 15.0
+
+    if len(observed_speeds) < 5:
+        return d_min, d_max, t_min, t_max, v_min, v_max, False
+
+    arr = np.array(observed_speeds[-50:])
+    v_p5 = max(float(np.percentile(arr, 5)), 0.01)
+    v_p95 = float(np.percentile(arr, 95))
+
+    changed = False
+
+    new_t_min = max(ABS_T_MIN, d_min / (v_p95 * 2.5))
+    if new_t_min < t_min * 0.7:
+        t_min = new_t_min
+        changed = True
+
+    new_t_max = min(ABS_T_MAX, (d_max / v_p5) * 2.5)
+    if new_t_max > t_max * 1.3:
+        t_max = new_t_max
+        changed = True
+
+    # Expand speed bounds if observed speeds are outside range
+    if v_p5 < v_min * 0.7:
+        v_min = v_p5 * 0.5
+        changed = True
+    if v_p95 > v_max * 0.8:
+        v_max = v_p95 * 2.0
+        changed = True
+
+    return d_min, d_max, t_min, t_max, v_min, v_max, changed
+
+
+# ----------------------------
+# Continuous-margin PI controller
+# ----------------------------
+class MarginPIController:
+    """
+    Controls difficulty u in [0,1] using continuous margin feedback.
+
+    Margin definition:
+      HIT : m = 1 - time_ratio  (>=0; bigger => easier)
+      MISS: m = dist_ratio - 1  (<=0; closer to 0 => near miss; very negative => too hard)
+
+    We track EWMA m_hat, and use error e = (m_hat - m_star).
+    - If m_hat > m_star: too easy => e>0 => increase difficulty u
+    - If m_hat < m_star: too hard => e<0 => decrease difficulty u
+    """
+    def __init__(self, *, m_star=0.05, Kp=0.9, Ki=0.15, ewma_alpha=0.15, u0=0.35):
+        self.m_star = float(m_star) #m_star: target margin
+        self.Kp = float(Kp)
+        self.Ki = float(Ki)
+        self.alpha = float(ewma_alpha)
+
+        self.u = float(np.clip(u0, 0.0, 1.0))
+        self.m_hat = 0.0
+        self.e_int = 0.0
+
+    def update(self, m_k):
+        # EWMA of margin
+        self.m_hat = (1.0 - self.alpha) * self.m_hat + self.alpha * float(m_k)
+
+        # error: positive means too easy -> increase u (harder)
+        e = self.m_hat - self.m_star
+
+        # anti-windup: only integrate if not saturated in the direction of the error
+        pushing_up = (e > 0 and self.u >= 1.0 - 1e-9)
+        pushing_down = (e < 0 and self.u <= 0.0 + 1e-9)
+        if not (pushing_up or pushing_down):
+            self.e_int += e
+
+        # PI update
+        du = self.Kp * e + self.Ki * self.e_int
+        self.u = float(np.clip(self.u + du, 0.0, 1.0))
+        return self.u, self.m_hat, e
+
+
+# ----------------------------
+# Map difficulty u -> (d,t)
+# u is actually the margin of the time and distance ratios
+# ----------------------------
+def propose_dt_from_u(
+    u,
+    *,
+    dmin=0.10, dmax=1.0,
+    tmin=0.3,  tmax=7.0,
+    vmin=0.10, vmax=1.50,
+    rng=None
+):
+    """
+    Difficulty should increase with:
+      - larger distance (ROM demand)
+      - higher required speed v_req = d/t
+
+    We do:
+      d_base = dmin + u*(dmax-dmin)
+      v_req  = vmin + u*(vmax-vmin)
+      t_base = d_base / v_req
+      then clamp t_base to [tmin,tmax]
+
+    Note: once t is clamped, the realized v_req may deviate; still OK.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    random_split = rng.uniform(0.4, 0.6) # decide how much of added difficulty comes from d vs t
+
+    d_base = dmin + u * (dmax - dmin) * random_split
+    v_req = vmin + u * (vmax - vmin) * (1.0 - random_split)
+
+    t_base = d_base / max(v_req, 1e-9)
+    t_base = float(np.clip(t_base, tmin, tmax))
+
+    return float(d_base), float(t_base)
+
+
+def choose_with_exploration_and_diversity(
+    d_base, t_base,
+    *,
+    counts_5x5,
+    dmin, dmax, tmin, tmax,
+    rng,
+    n_candidates=25,
+    d_sigma=0.05,
+    t_sigma=0.35,
+    w_close=1.0,
+    w_rare=0.35
+):
+    """
+    Build a small local candidate set around (d_base,t_base), then pick one by
+    a soft score:
+      score = -w_close * normalized_distance_to_base + w_rare * rarity_bonus(bin)
+
+    This yields variety over the 5x5 grid while staying near the controller's intent.
+    """
+    cand = []
+    scores = []
+
+    for _ in range(n_candidates):
+        d = float(np.clip(rng.normal(d_base, d_sigma), dmin, dmax))
+        t = float(np.clip(rng.normal(t_base, t_sigma), tmin, tmax))
+
+        # closeness penalty in normalized space
+        dn = (d - d_base) / (dmax - dmin + 1e-12)
+        tn = (t - t_base) / (tmax - tmin + 1e-12)
+        close_pen = dn*dn + tn*tn
+
+        # rarity bonus from 5x5 bins
+        i, j = bin25(d, t, dmin, dmax, tmin, tmax)
+        rare = rarity_bonus(counts_5x5, i, j)
+
+        score = -w_close * close_pen + w_rare * rare
+        cand.append((d, t, i, j))
+        scores.append(score)
+
+    # softmax sampling (keeps exploration stochastic but biased)
+    s = np.array(scores, dtype=float)
+    s = s - s.max()
+    p = np.exp(s)
+    p = p / p.sum()
+
+    idx = int(rng.choice(len(cand), p=p))
+    d, t, i, j = cand[idx]
+    return d, t, i, j
+
+
+def sample_diagonal_pair(
+    *,
+    dmin,
+    dmax,
+    tmin,
+    tmax,
+    d_step,
+    t_step,
+    rng=None
+):
+    """
+    Sample a (d,t) pair along the diagonal:
+    larger d <-> larger t, quantized to the discretized grid.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    u = rng.uniform(0.0, 1.0)
+    d = dmin + u * (dmax - dmin)
+    t = tmin + u * (tmax - tmin)
+
+    # quantize to grid
+    d = round(d / d_step) * d_step
+    t = round(t / t_step) * t_step
+
+    return float(d), float(t)
+
+
+# ----------------------------
+# Main simulation loop
+# ----------------------------
+def run_sim(
+    patient: PatientModel,
+    n_trials=100,
+    seed=7,
+    # controller targets/tuning
+    m_star=0.15,
+    Kp=0.9,
+    Ki=0.15,
+    ewma_alpha=0.15,
+    # action space bounds (defaults; overridden by calibration)
+    dmin=0.10, dmax=1.0,
+    tmin=0.3,  tmax=7.0,
+    d_step=0.05,
+    t_step=0.1,
+    # mapping bounds for required speed (defaults; overridden by calibration)
+    vmin=0.10, vmax=1.50,
+    # diagonal resample control
+    diag_after=10,
+    calibration=True,
+):
+    rng = np.random.default_rng(seed)
+
+    # --- Calibration and bounds derivation ---
+    calibration_result = None
+    if calibration:
+        calibration_result = patient.calibration()
+        apply_calibration_priors(patient, calibration_result)
+
+        # Override bounds with calibration-derived values
+        cal_dmin, cal_dmax, cal_tmin, cal_tmax, cal_vmin, cal_vmax = \
+            derive_bounds_from_calibration(calibration_result, patient)
+        dmin, dmax = cal_dmin, cal_dmax
+        tmin, tmax = cal_tmin, cal_tmax
+        vmin, vmax = cal_vmin, cal_vmax
+
+    ctrl = MarginPIController(m_star=m_star, Kp=Kp, Ki=Ki, ewma_alpha=ewma_alpha, u0=0.35)
+
+    counts_5x5 = np.zeros((5, 5), dtype=int)
+    previous_hit = True
+
+    # Per-direction PI controllers (control-theory direction selection)
+    n_directions = 5
+    m_hat_dir = np.zeros(n_directions, dtype=float)
+    n_dir = np.zeros(n_directions, dtype=int)
+    dir_ewma_alpha = 0.20
+    dir_probe_rounds = 3  # rounds of systematic probing per direction (system identification)
+    dir_reprobe_interval = 25  # periodic re-identification (dithering)
+
+    # Per-direction PI state: u_dir[i] = desirability of direction i
+    # High margin (easy) -> positive error -> u_dir rises -> direction preferred
+    # Low margin (hard)  -> negative error -> u_dir falls -> direction avoided
+    u_dir = np.full(n_directions, 0.5)
+    e_int_dir = np.zeros(n_directions, dtype=float)
+    Kp_dir = 0.6
+    Ki_dir = 0.10
+
+    hist = {
+        "u": [],
+        "d": [],
+        "t": [],
+        "direction": [],
+        "hit": [],
+        "time_ratio": [],
+        "dist_ratio": [],
+        "margin": [],
+        "m_hat": [],
+        "err": [],
+        "bin_i": [],
+        "bin_j": [],
+    }
+
+    observed_speeds = []
+
+    for k in range(n_trials):
+        # Backup plan: check bounds expansion every 50 trials
+        if k > 0 and k % 50 == 0 and len(observed_speeds) >= 5:
+            new_dmin, new_dmax, new_tmin, new_tmax, new_vmin, new_vmax, changed = \
+                expand_bounds_if_needed(dmin, dmax, tmin, tmax, vmin, vmax, observed_speeds)
+            if changed:
+                dmin, dmax = new_dmin, new_dmax
+                tmin, tmax = new_tmin, new_tmax
+                vmin, vmax = new_vmin, new_vmax
+
+        if diag_after is not None and (k % diag_after == 0):
+            d_sys, t_sys = sample_diagonal_pair(
+                dmin=dmin, dmax=dmax, tmin=tmin, tmax=tmax,
+                d_step=d_step, t_step=t_step,
+                rng=rng
+            )
+            i, j = bin25(d_sys, t_sys, dmin, dmax, tmin, tmax)
+        else:
+            d_base, t_base = propose_dt_from_u(
+                ctrl.u,
+                dmin=dmin, dmax=dmax, tmin=tmin, tmax=tmax,
+                vmin=vmin, vmax=vmax,
+                rng=rng
+            )
+            d_sys, t_sys, i, j = choose_with_exploration_and_diversity(
+                d_base, t_base,
+                counts_5x5=counts_5x5,
+                dmin=dmin, dmax=dmax, tmin=tmin, tmax=tmax,
+                rng=rng
+            )
+
+        counts_5x5[i, j] += 1
+        lvl = distance_level_3(d_sys, dmin, dmax)
+
+        # Direction selection: control-theory approach
+        total_probe_trials = n_directions * dir_probe_rounds
+        if k < total_probe_trials:
+            # Phase 1 — System identification: round-robin probing of all directions
+            direction = k % n_directions
+        elif k % dir_reprobe_interval == 0:
+            # Periodic re-identification (dithering): reprobe least-sampled direction
+            direction = int(np.argmin(n_dir))
+        else:
+            # Phase 2 — Steady-state: select direction with highest PI output.
+            # The per-direction PI drives u_dir up for easy directions, down for hard ones.
+            direction = int(np.argmax(u_dir))
+
+        outcome = patient.sample_trial(
+            t_sys=t_sys,
+            d_sys=d_sys,
+            distance_level=lvl,
+            previous_hit=previous_hit,
+            direction_bin=direction,
+        )
+
+        hit = bool(outcome["hit"])
+        previous_hit = hit
+        if hit:
+            patient.spatial_success_alpha[direction] += 1.0
+        else:
+            patient.spatial_success_beta[direction] += 1.0
+
+        time_ratio = float(outcome["time_ratio"])
+        dist_ratio = float(outcome["dist_ratio"])
+
+        if hit:
+            m_k = 1.0 - time_ratio
+            hit_margin.append(m_k)
+        else:
+            m_k = (dist_ratio - 1.0) * 0.7
+            miss_margin.append(m_k)
+
+        # Track observed speed for backup expansion
+        d_pat = dist_ratio * d_sys
+        t_pat = float(outcome["t_pat"])
+        if hit and t_pat > 0.01:
+            observed_speeds.append(d_pat / t_pat)
+        elif t_sys > 0.01:
+            observed_speeds.append(d_pat / t_sys)
+
+        n_dir[direction] += 1
+        m_hat_dir[direction] = (1.0 - dir_ewma_alpha) * m_hat_dir[direction] + dir_ewma_alpha * m_k
+
+        # Per-direction PI update: drive u_dir toward directions with margin near m_star
+        e_dir = m_hat_dir[direction] - ctrl.m_star
+        pushing_up_dir = (e_dir > 0 and u_dir[direction] >= 1.0 - 1e-9)
+        pushing_down_dir = (e_dir < 0 and u_dir[direction] <= 0.0 + 1e-9)
+        if not (pushing_up_dir or pushing_down_dir):
+            e_int_dir[direction] += e_dir
+        du_dir = Kp_dir * e_dir + Ki_dir * e_int_dir[direction]
+        u_dir[direction] = float(np.clip(u_dir[direction] + du_dir, 0.0, 1.0))
+
+        u_next, m_hat, err = ctrl.update(m_k)
+
+        if diag_after is not None and (k % diag_after == 0):
+            ctrl.u = (d_sys - dmin) / (dmax - dmin + 1e-12)
+
+        hist["u"].append(ctrl.u)
+        hist["d"].append(d_sys)
+        hist["t"].append(t_sys)
+        hist["direction"].append(int(direction))
+        hist["hit"].append(int(hit))
+        hist["time_ratio"].append(time_ratio)
+        hist["dist_ratio"].append(dist_ratio)
+        hist["margin"].append(m_k)
+        hist["m_hat"].append(m_hat)
+        hist["err"].append(err)
+        hist["bin_i"].append(i)
+        hist["bin_j"].append(j)
+
+    return hist, counts_5x5, patient

@@ -1,4 +1,6 @@
 # patient_simulation.py
+from __future__ import annotations
+
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -39,11 +41,11 @@ class PatientModel:
         # REACTION TIME MODEL
         r_base=0.0,          # seconds (reaction/latency baseline)
         r_sigma=0.0,          # seconds
-        # SPATIAL DIRECTION MODEL
-        spatial_strength_map=None,
-        max_reach_map=None,
+        # DIRECTION MODEL (1D left/right with handedness gradient)
+        handedness=0.0,       # -1.0 (leftie) to +1.0 (rightie), 0.0 = neutral
+        max_reach=None,       # scalar ROM ceiling (meters); defaults to max(d_levels)
+        k_dir_decay=0.5,     # speed penalty on non-preferred side
     ):
-        # Keep the structure/attributes similar to the old model
         self.d_levels = np.array(d_levels, dtype=float)
         self.k_d0_per_sec = float(k_d0_per_sec)
         self.k_d_decay = float(k_d_decay)
@@ -52,44 +54,26 @@ class PatientModel:
 
         self.rng = np.random.default_rng(seed)
 
-        # New model params
         self.v_sigma0 = float(v_sigma0)
         self.v_sigma_growth = float(v_sigma_growth)
         self.r_base = float(r_base)
         self.r_sigma = float(r_sigma)
 
-        # 9-bin (3 elevation x 3 azimuth) strength map for front hemisphere.
-        # Azimuth bins (left->right): [left, center, right]
-        # Elevation bins (low->high): [lower, mid, upper]
-        # Values are multiplicative factors on velocity; right hand = harder left.
-        # Indexing: idx = elevation * 3 + azimuth
-        if spatial_strength_map is None:
-            self.spatial_strength_map = np.array(
-                [0.50, 0.60, 0.70, 0.75, 0.85, 0.95, 0.90, 0.98, 1.00],
-                dtype=float,
-            )
-        else:
-            self.spatial_strength_map = np.array(spatial_strength_map, dtype=float)
+        # Direction: 5 bins (0-4) mapping to left-right angle.
+        # Bin 0 = far left, bin 2 = center, bin 4 = far right.
+        self.handedness = float(np.clip(handedness, -1.0, 1.0))
+        self.k_dir_decay = float(k_dir_decay)
 
-        # Per-direction ROM ceiling (meters), indexed by direction idx in [0..8].
-        # Default is derived from spatial strength:
-        #   max_reach_map = max(d_levels) * (strength / max_strength)
-        # so the strongest direction keeps full range and weaker directions get
-        # proportionally smaller reachable distance.
-        if max_reach_map is None:
-            base_max_reach = float(np.max(self.d_levels))
-            strength = np.asarray(self.spatial_strength_map, dtype=float)
-            strength_max = float(np.max(strength)) if strength.size > 0 else 1.0
-            strength_norm = strength / max(strength_max, 1e-9)
-            self.max_reach_map = base_max_reach * strength_norm
+        # Scalar ROM ceiling (meters).
+        if max_reach is None:
+            self.max_reach = float(np.max(self.d_levels))
         else:
-            self.max_reach_map = np.asarray(max_reach_map, dtype=float)
-        if self.max_reach_map.shape != (9,):
-            raise ValueError("max_reach_map must have shape (9,).")
-        self.max_reach_map = np.clip(self.max_reach_map, 1e-6, None)
-        # Per-direction Beta(1,1) priors for success probability.
-        self.spatial_success_alpha = np.ones(9, dtype=float)
-        self.spatial_success_beta = np.ones(9, dtype=float)
+            self.max_reach = max(float(max_reach), 1e-6)
+
+        # Per-direction Beta(4,1) priors: optimistic start (mean ~0.8).
+        # Assumes directions are reachable until evidence says otherwise.
+        self.spatial_success_alpha = np.full(5, 4.0, dtype=float)
+        self.spatial_success_beta = np.ones(5, dtype=float)
 
         # derive time taken to reach each d_level at mean speed
         self.d_means = self.d_levels
@@ -129,17 +113,12 @@ class PatientModel:
         t_sys = float(t_sys)
         d_sys = float(d_sys)
         lvl = distance_level
-        idx = None if direction_bin is None else int(np.clip(direction_bin, 0, 8))
-        if idx is None:
-            max_reach_dir = float(np.max(self.max_reach_map))
-        else:
-            max_reach_dir = float(self.max_reach_map[idx])
+        idx = None if direction_bin is None else int(np.clip(direction_bin, 0, 4))
 
-        # Hard ROM edge-case guard: if requested distance exceeds directional
-        # reachable ceiling, immediately return a miss at timeout.
-        if d_sys > max_reach_dir:
+        # Hard ROM guard: if requested distance exceeds max_reach, immediate miss.
+        if d_sys > self.max_reach:
             t_pat = t_sys
-            d_pat = max_reach_dir
+            d_pat = self.max_reach
             hit = False
             time_ratio = 1.0
             dist_ratio = d_pat / max(d_sys, 1e-9)
@@ -159,11 +138,15 @@ class PatientModel:
         r = float(self.rng.normal(loc=r_mean, scale=self.r_sigma))
         r = max(r, 0.0)
 
-        # ---- 2) sample speed v ~ Normal(mean=0.10, sd=...) ----
+        # ---- 2) sample speed v ~ Normal(mean=..., sd=...) ----
         v_mean = self._mean_speed(d_sys)
-        if idx is not None:
-            v_mean *= float(self.spatial_strength_map[idx])
         v_sigma = self._speed_sigma(d_sys)
+        # Handedness gradient: penalise speed on non-preferred side.
+        if idx is not None and self.handedness != 0.0:
+            angle_norm = (idx - 2) / 2.0  # bin 0-4 → [-1, +1]
+            alignment = self.handedness * angle_norm
+            mismatch = max(0.0, -alignment)
+            v_mean *= np.exp(-self.k_dir_decay * mismatch)
         v = float(self.rng.normal(loc=v_mean, scale=v_sigma))
         # Truncate to strictly positive to avoid division issues
         if v <= 1e-6:
@@ -216,7 +199,7 @@ class PatientModel:
           - A miss at `t_cap` is a censored observation (target not reached in time).
 
         By default:
-          - If `direction_bin is None`, probe all 9 bins.
+          - If `direction_bin is None`, probe all 5 bins.
           - If `direction_bin` is provided, probe only that bin.
         """
         d_levels = np.sort(np.asarray(self.d_levels, dtype=float))
@@ -228,9 +211,9 @@ class PatientModel:
             raise ValueError("t_cap must be positive.")
 
         if direction_bin is None:
-            directions = list(range(9))
+            directions = list(range(5))
         else:
-            directions = [int(np.clip(direction_bin, 0, 8))]
+            directions = [int(np.clip(direction_bin, 0, 4))]
 
         idx = np.round(
             np.linspace(0, d_levels.size - 1, int(n_per_direction))
