@@ -405,6 +405,8 @@ def visualize(hist, counts, phit_true, ideal_dist, p_star):
     plt.plot(p_int, label="predicted P(hit) @ intended")
     plt.plot(roll, linestyle="--", label="rolling hit rate")
     plt.axhline(p_star, linestyle=":", label=f"p_star={p_star}")
+    for vx in (25, 50, 100):
+        plt.axvline(x=vx, color='gray', linestyle=':', linewidth=0.8, alpha=0.6)
     plt.ylim(-0.05, 1.05)
     plt.xlabel("trial")
     plt.title("Model prediction vs realized performance")

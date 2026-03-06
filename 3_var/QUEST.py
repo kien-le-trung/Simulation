@@ -341,6 +341,8 @@ def plot_quest_plus_results(result, p_target=0.65):
     rm = rolling_mean(hit, w=10)
     plt.plot(np.arange(len(rm)) + 10 - 1, rm, linestyle="--", label="rolling hit rate (w=10)")
     plt.axhline(p_target, linestyle=":", label=f"target p={p_target:.2f}")
+    for vx in (25, 50, 100):
+        plt.axvline(x=vx, color='gray', linestyle=':', linewidth=0.8, alpha=0.6)
     plt.ylim(-0.05, 1.05)
     plt.title("Targeting hit probability")
     plt.xlabel("Trial")

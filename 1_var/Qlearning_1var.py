@@ -355,6 +355,8 @@ def plot_qlearning_results(
     ax.plot(trials, rolling_hit, label=f"rolling hit ({window})")
     ax.plot(trials, mean_phit, linestyle="--", label="mean p_hit")
     ax.axhline(cfg.p_star, linestyle=":", label=f"p*={cfg.p_star:.2f}")
+    for vx in (25, 50, 100):
+        ax.axvline(x=vx, color='gray', linestyle=':', linewidth=0.8, alpha=0.6)
     ax.set_ylim(0.0, 1.0)
     ax.set_title("Hit Behavior")
     ax.set_xlabel("Trial")

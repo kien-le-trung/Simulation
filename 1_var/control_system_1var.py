@@ -245,7 +245,7 @@ def run_sim(
     n_trials=100,
     seed=7,
     # controller targets/tuning
-    m_star=0.10,
+    m_star=0.10, # use 90% of given distance as target
     Kp=0.9,
     Ki=0.15,
     ewma_alpha=0.15,
@@ -264,13 +264,6 @@ def run_sim(
 ):
     rng = np.random.default_rng(seed)
 
-    # if patient_profile is not None and patient_profile in PATIENT_FIXED_T:
-    #     t_fixed = float(PATIENT_FIXED_T[patient_profile])
-    # else:
-    #     t_fixed = float(t_fixed)
-    # tmin = t_fixed
-    # tmax = t_fixed
-
     calibration_result = None
     if calibration:
         calibration_result = patient.calibration()
@@ -280,7 +273,9 @@ def run_sim(
         )
         dmin, dmax = cal_dmin, cal_dmax
         vmin, vmax = cal_vmin, cal_vmax
+
     dmin, dmax = cap_distance_bounds(patient, dmin, dmax)
+
     if dmin > dmax:
         dmin, dmax = dmax, dmin
 
@@ -299,8 +294,6 @@ def run_sim(
         "margin": [],
         "m_hat": [],
         "err": [],
-        # "bin_i": [],
-        # "bin_j": [],
     }
 
     observed_speeds = []
@@ -319,15 +312,6 @@ def run_sim(
 
         d_sys = propose_d_from_u(ctrl.u, dmin=dmin, dmax=dmax)
         t_sys = t_fixed
-        # d_sys, t_sys, i, j = choose_with_exploration_and_diversity(
-        #     d_base,
-        #     dmin=dmin,
-        #     dmax=dmax,
-        #     tmin=tmin,
-        #     tmax=tmax,
-        # )
-
-        # counts_5x5[i, j] += 1
 
         lvl = distance_level_3(d_sys, dmin, dmax)
 
@@ -372,7 +356,5 @@ def run_sim(
         hist["margin"].append(m_k)
         hist["m_hat"].append(m_hat)
         hist["err"].append(err)
-        # hist["bin_i"].append(i)
-        # hist["bin_j"].append(j)
 
     return hist, counts_5x5, patient

@@ -313,10 +313,10 @@ if __name__ == "__main__":
     all_matrix_data = {}
 
     algorithms = [
-        "control_system_3var",
+        # "control_system_3var",
         "operations_research_3var",
-        "staircasing_3var",
-        "logistic_online_3var_v2",
+        # "staircasing_3var",
+        # "logistic_online_3var_v2",
         # "QUEST_3var",
         # "Qlearning",
         # "hybrid_adaptive_3var",
@@ -425,7 +425,7 @@ if __name__ == "__main__":
         squeeze=False,
     )
     TARGET_HIT_RATE = 0.70
-    CHECKPOINTS = [50, 100, 200]
+    CHECKPOINTS = [25, 50, 100]
     window = 50
     
     # Track errors per checkpoint for column-level means

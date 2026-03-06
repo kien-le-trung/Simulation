@@ -445,12 +445,6 @@ if __name__ == "__main__":
     fig.savefig(patient_profiles_dir / "patient_rom_by_profile.png", dpi=150)
     plt.close(fig)
 
-    all_t_values = []
-    all_d_values = []
-    profile_caterpillar_stats = {}
-    all_hits_by_profile = {}
-    all_matrix_data = {}
-
     algorithms = [
         "control_system_1var",
         "operations_research_1var",
@@ -460,132 +454,80 @@ if __name__ == "__main__":
         "QUEST_1var",
     ]
 
-    for patient_profile in PATIENT_PROFILES.keys():
-        print(f"=== Patient profile: {patient_profile} ===")
+    T_FIXED_VALUES = [0.8, 2, 4, 8]
+    T_COLORS = {0.8: "#e41a1c", 2: "#ff7f00", 4: "#377eb8", 8: "#4daf4a"}
 
+    profile_names = list(PATIENT_PROFILES.keys())
+    n_profiles = len(profile_names)
+    n_algorithms = len(algorithms)
+
+    # Patient-specific phit/ideal plots (independent of t_fixed)
+    for patient_profile in profile_names:
         fig, _, _, _ = plot_phit_and_ideal_by_profile(patient_profile)
         fig.savefig(assets_dir / f"{patient_profile}_phit_ideal.png", dpi=150)
         plt.close(fig)
 
-        means_time = []
-        means_dist = []
-        std_time = []
-        std_dist = []
-        hits_by_algorithm = {}
-
-        for algorithm in algorithms:
-            print(
-                f"Running algorithm: {algorithm} "
-                f"(patient={patient_profile}, t_fixed={PATIENT_FIXED_T.get(patient_profile)}s)"
-            )
-            result = run_algorithm(
-                algorithm_name=algorithm,
-                patient_profile=patient_profile,
-                n_trials=200,
-                calibration=False,
-            )
-            if not isinstance(result, tuple) or len(result) < 2:
-                raise ValueError(f"Unexpected result from {algorithm}: {type(result)}")
-            logs, counts = result[0], result[1]
-
-            avg_time, sd_time = viz.average_time(logs)
-            avg_dist, sd_dist = viz.average_distance(logs)
-
-            means_time.append(avg_time)
-            means_dist.append(avg_dist)
-            std_time.append(sd_time)
-            std_dist.append(sd_dist)
-            hits_by_algorithm[algorithm] = logs.get("hit", [])
-
-            print(f"  Mean hit rate (last 200): {np.mean(np.array(logs.get('hit', []))[-200:]):.3f}")
-            print(f"  Mean time: {avg_time:.4f} +/- {sd_time:.4f}")
-            print(f"  Mean dist: {avg_dist:.4f} +/- {sd_dist:.4f}")
-
-            t_arr = np.asarray(logs.get("t", []), dtype=float)
-            d_arr = np.asarray(logs.get("d", []), dtype=float)
-            if t_arr.size > 0:
-                all_t_values.extend(t_arr.tolist())
-            if d_arr.size > 0:
-                all_d_values.extend(d_arr.tolist())
-
-            dir_arr = np.asarray(logs.get("direction", []), dtype=int)
-            dir_counts = np.zeros(5, dtype=int)
-            if dir_arr.size > 0:
+    # ----------------------------------------------------------------
+    # Run all experiments across t_fixed values
+    # results_by_t[t_fixed][profile][algorithm] = {logs, counts, d_arr, t_arr, dir_counts}
+    # ----------------------------------------------------------------
+    results_by_t = {}
+    _orig_patient_fixed_t = dict(PATIENT_FIXED_T)
+    for t_fixed in T_FIXED_VALUES:
+        for k in PATIENT_FIXED_T:
+            PATIENT_FIXED_T[k] = float(t_fixed)
+        results_by_t[t_fixed] = {}
+        for patient_profile in profile_names:
+            results_by_t[t_fixed][patient_profile] = {}
+            print(f"=== t_fixed={t_fixed}s | {patient_profile} ===")
+            for algorithm in algorithms:
+                result = run_algorithm(
+                    algorithm_name=algorithm,
+                    patient_profile=patient_profile,
+                    n_trials=200,
+                    calibration=False,
+                )
+                logs, counts = result[0], result[1]
+                d_arr = np.asarray(logs.get("d", []), dtype=float)
+                t_arr = np.asarray(logs.get("t", []), dtype=float)
+                dir_arr = np.asarray(logs.get("direction", []), dtype=int)
+                dir_counts = np.zeros(5, dtype=int)
                 for di in range(5):
-                    dir_counts[di] = int(np.sum(dir_arr == di))
+                    if dir_arr.size > 0:
+                        dir_counts[di] = int(np.sum(dir_arr == di))
+                results_by_t[t_fixed][patient_profile][algorithm] = {
+                    "logs": logs,
+                    "counts": np.asarray(counts),
+                    "d_arr": d_arr,
+                    "t_arr": t_arr,
+                    "dir_counts": dir_counts,
+                }
+                hr = np.mean(np.array(logs.get("hit", []))[-200:])
+                avg_d, _ = viz.average_distance(logs)
+                print(f"  {algorithm}: hit={hr:.3f}  mean_d={avg_d:.3f}")
+    for k, v in _orig_patient_fixed_t.items():
+        PATIENT_FIXED_T[k] = v
 
-            if patient_profile not in all_matrix_data:
-                all_matrix_data[patient_profile] = {}
-            all_matrix_data[patient_profile][algorithm] = {
-                "counts": np.asarray(counts),
-                "dir_counts": dir_counts,
-                "d_arr": d_arr,
-                "t_arr": t_arr,
-                "d_range": (float(d_arr.min()), float(d_arr.max())) if len(d_arr) > 0 else (standard_d_min, standard_d_max),
-                "t_range": (float(t_arr.min()), float(t_arr.max())) if len(t_arr) > 0 else (T_RANDOM_MIN, T_RANDOM_MAX),
-            }
-
-            d_level_counts = _discretized_d_counts_from_logs(
-                logs=logs,
-                d_min=standard_d_min,
-                d_max=standard_d_max,
-                n_levels=5,
-            )
-            plot_1var_d_level_counts(
-                d_level_counts,
-                title=f"Discretized d-level counts for {algorithm} - {patient_profile}",
-                save_path=assets_dir / f"{patient_profile}_{algorithm}_d_levels_counts.png",
-                show=False,
-                level_labels=["closest", "close", "medium", "far", "farthest"],
-            )
-
-        profile_caterpillar_stats[patient_profile] = {
-            "algorithm_names": list(algorithms),
-            "means_time": list(means_time),
-            "std_time": list(std_time),
-            "means_dist": list(means_dist),
-            "std_dist": list(std_dist),
-        }
-        all_hits_by_profile[patient_profile] = dict(hits_by_algorithm)
-
-    time_xlim = (
-        float(np.min(all_t_values)),
-        float(np.max(all_t_values)),
-    ) if all_t_values else None
-    dist_xlim = (
-        float(np.min(all_d_values)),
-        float(np.max(all_d_values)),
-    ) if all_d_values else (standard_d_min, standard_d_max)
-
-    plot_caterpillar_means_by_algorithm_1var(
-        profile_stats=profile_caterpillar_stats,
-        title="Mean/SD by Patient Profile Across 1-var Algorithms",
-        time_xlim=time_xlim,
-        dist_xlim=dist_xlim,
-        save_path=assets_dir / "all_algorithms_caterpillar.png",
-        show=False,
-    )
-
-    # Matrix of rolling hit-rate plots: rows=profiles, cols=algorithms.
-    profile_names = list(all_hits_by_profile.keys())
-    n_profiles = len(profile_names)
-    n_algorithms = len(algorithms)
-    fig, axes = plt.subplots(
-        n_profiles,
-        n_algorithms,
-        figsize=(4 * n_algorithms, 2.8 * n_profiles),
-        sharex=True,
-        sharey=True,
-        squeeze=False,
-    )
+    # ----------------------------------------------------------------
+    # Plot 1: Rolling hit rate matrix — one colored line per t_fixed
+    # rows=profiles, cols=algorithms
+    # ----------------------------------------------------------------
     window = 50
+    fig, axes = plt.subplots(
+        n_profiles, n_algorithms,
+        figsize=(4 * n_algorithms, 2.8 * n_profiles),
+        sharex=True, sharey=True, squeeze=False,
+    )
     for row, profile_name in enumerate(profile_names):
         for col, algorithm in enumerate(algorithms):
             ax = axes[row, col]
-            hits = all_hits_by_profile[profile_name].get(algorithm, [])
-            rolling = viz.rolling_hitting_rate({"hit": hits}, window=window, min_periods=1)
-            if rolling.size > 0:
-                ax.plot(rolling, linewidth=1.5)
+            for t_fixed in T_FIXED_VALUES:
+                hits = results_by_t[t_fixed][profile_name][algorithm]["logs"].get("hit", [])
+                rolling = viz.rolling_hitting_rate({"hit": hits}, window=window, min_periods=1)
+                if rolling.size > 0:
+                    ax.plot(rolling, linewidth=1.5, color=T_COLORS[t_fixed], label=f"t={t_fixed}s")
+            for vx in (25, 50, 100):
+                ax.axvline(x=vx, color='gray', linestyle=':', linewidth=0.8, alpha=0.6)
             ax.set_ylim(0.0, 1.0)
             ax.grid(True, alpha=0.3)
             if row == 0:
@@ -594,92 +536,175 @@ if __name__ == "__main__":
                 ax.set_ylabel(profile_name, fontsize=9)
             if row == n_profiles - 1:
                 ax.set_xlabel("Trial")
-    fig.suptitle("Rolling Hit Rate Matrix (Profiles x Algorithms)", fontsize=13)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper right", fontsize=9, ncol=len(T_FIXED_VALUES))
+    fig.suptitle("Rolling Hit Rate (Profiles × Algorithms) — Multi t_fixed", fontsize=13)
     fig.tight_layout()
-    fig.savefig(assets_dir / "all_algorithms_hit_rate_matrix.png", dpi=150)
+    fig.savefig(assets_dir / "all_algorithms_hit_rate_matrix_multi_t.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    # Combined matrices: d×t heatmaps + direction bars.
-    dir_angle_labels = [f"{viz.DIR_INDEX_TO_ANGLE[d]:.0f}" for d in range(5)]
+    # ----------------------------------------------------------------
+    # Plot 2: d-level counts — grouped bars per (profile, algorithm)
+    # ----------------------------------------------------------------
+    level_labels = ["closest", "close", "medium", "far", "farthest"]
+    n_levels = 5
+    x = np.arange(n_levels)
+    bar_width = 0.18
+    bar_offsets = [(i - (len(T_FIXED_VALUES) - 1) / 2) * bar_width for i in range(len(T_FIXED_VALUES))]
+    for profile_name in profile_names:
+        for algorithm in algorithms:
+            fig, ax = plt.subplots(figsize=(8, 3.8))
+            for ti, t_fixed in enumerate(T_FIXED_VALUES):
+                logs = results_by_t[t_fixed][profile_name][algorithm]["logs"]
+                d_counts = _discretized_d_counts_from_logs(logs, standard_d_min, standard_d_max, n_levels)
+                bars = ax.bar(
+                    x + bar_offsets[ti], d_counts, bar_width,
+                    label=f"t={t_fixed}s", color=T_COLORS[t_fixed],
+                    edgecolor="black", linewidth=0.5,
+                )
+                for rect, val in zip(bars, d_counts):
+                    if val > 0:
+                        ax.text(
+                            rect.get_x() + rect.get_width() * 0.5,
+                            rect.get_height(), str(int(val)),
+                            ha="center", va="bottom", fontsize=6,
+                        )
+            ax.set_xticks(x)
+            ax.set_xticklabels(level_labels)
+            ax.set_xlabel("Distance Level")
+            ax.set_ylabel("Count")
+            ax.set_title(f"d-level counts: {algorithm} — {profile_name}")
+            ax.legend(fontsize=8)
+            ax.grid(True, axis="y", alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(
+                assets_dir / f"{profile_name}_{algorithm}_d_levels_counts_multi_t.png",
+                dpi=150,
+            )
+            plt.close(fig)
 
-    global_d_lo = min(mdata["d_range"][0] for prof in all_matrix_data.values() for mdata in prof.values())
-    global_d_hi = max(mdata["d_range"][1] for prof in all_matrix_data.values() for mdata in prof.values())
-    global_t_lo = min(mdata["t_range"][0] for prof in all_matrix_data.values() for mdata in prof.values())
-    global_t_hi = max(mdata["t_range"][1] for prof in all_matrix_data.values() for mdata in prof.values())
+    # ----------------------------------------------------------------
+    # Plot 3: Caterpillar matrix — rows=algorithms, cols=t_fixed
+    # Each cell: patient profiles on y-axis, mean distance ± SD on x-axis
+    # Color encodes t_fixed (matches the column)
+    # ----------------------------------------------------------------
+    n_t = len(T_FIXED_VALUES)
+    y_prof = np.arange(n_profiles)
 
+    fig, axes = plt.subplots(
+        n_algorithms, n_t,
+        figsize=(3.0 * n_t, 2.0 * n_algorithms),
+        squeeze=False,
+        sharex=True, sharey=True,
+    )
+    # Global x-range shared across all cells
+    all_means_dist = [
+        viz.average_distance(results_by_t[t][p][a]["logs"])[0]
+        for t in T_FIXED_VALUES for p in profile_names for a in algorithms
+    ]
+    all_sd_dist = [
+        viz.average_distance(results_by_t[t][p][a]["logs"])[1]
+        for t in T_FIXED_VALUES for p in profile_names for a in algorithms
+    ]
+    x_lo = max(0.0, min(m - s for m, s in zip(all_means_dist, all_sd_dist)))
+    x_hi = max(m + s for m, s in zip(all_means_dist, all_sd_dist)) * 1.05
+
+    for row, algorithm in enumerate(algorithms):
+        for col, t_fixed in enumerate(T_FIXED_VALUES):
+            ax = axes[row, col]
+            color = T_COLORS[t_fixed]
+            for pi, profile_name in enumerate(profile_names):
+                logs = results_by_t[t_fixed][profile_name][algorithm]["logs"]
+                avg_d, sd_d = viz.average_distance(logs)
+                ax.errorbar(
+                    avg_d, y_prof[pi], xerr=sd_d,
+                    fmt="o", capsize=3, linewidth=1.5, color=color,
+                )
+            ax.set_xlim(x_lo, x_hi)
+            ax.set_yticks(y_prof)
+            ax.grid(True, axis="x", alpha=0.3)
+            if col == 0:
+                ax.set_yticklabels(profile_names, fontsize=7)
+                ax.set_ylabel(algorithm, fontsize=8)
+            if row == 0:
+                ax.set_title(f"t={t_fixed}s", fontsize=9, color=color)
+            if row == n_algorithms - 1:
+                ax.set_xlabel("Mean Distance (m)", fontsize=8)
+
+    fig.suptitle("Mean Distance ± SD — Algorithms × t_fixed", fontsize=12)
+    fig.tight_layout()
+    fig.savefig(assets_dir / "all_algorithms_caterpillar_multi_t.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # ----------------------------------------------------------------
+    # Plot 4: Distance distribution matrix — rows=profiles, cols=algorithms
+    # Each cell: grouped bar chart with one bar group per t_fixed (colored).
+    # Since t is fixed per run, the old d×t heatmap t-axis carried no info;
+    # this replaces the 4 separate figures with a single unified plot.
+    # ----------------------------------------------------------------
     N_D_BINS = 5
-    N_T_BINS = 8
-    d_edges = np.linspace(global_d_lo, global_d_hi, N_D_BINS + 1)
-    t_edges = np.geomspace(max(global_t_lo, 0.01), global_t_hi, N_T_BINS + 1)
+    level_labels_short = ["cls", "close", "med", "far", "frst"]
 
-    d_centers = 0.5 * (d_edges[:-1] + d_edges[1:])
-    t_centers = np.sqrt(t_edges[:-1] * t_edges[1:])
-    d_labels = [f"{v:.2f}" for v in d_centers]
-    t_labels = [f"{v:.1f}" for v in t_centers]
+    # Global d range across all t_fixed for consistent binning
+    all_d_vals_global = [
+        v
+        for t_fixed in T_FIXED_VALUES
+        for profile_name in profile_names
+        for algorithm in algorithms
+        for v in results_by_t[t_fixed][profile_name][algorithm]["d_arr"].tolist()
+    ]
+    global_d_lo = min(all_d_vals_global) if all_d_vals_global else 0.0
+    global_d_hi = max(all_d_vals_global) if all_d_vals_global else 1.0
+    if abs(global_d_hi - global_d_lo) < 1e-6:
+        global_d_hi = global_d_lo + 0.1
+    d_edges_global = np.linspace(global_d_lo, global_d_hi, N_D_BINS + 1)
+    d_bin_centers = 0.5 * (d_edges_global[:-1] + d_edges_global[1:])
+    d_bin_labels = [f"{v:.2f}" for v in d_bin_centers]
 
-    def rebin_dt(d_arr, t_arr):
-        mat = np.zeros((N_D_BINS, N_T_BINS), dtype=int)
-        for d_val, t_val in zip(d_arr, t_arr):
-            di = int(np.clip(np.searchsorted(d_edges, float(d_val), side='right') - 1, 0, N_D_BINS - 1))
-            ti = int(np.clip(np.searchsorted(t_edges, float(t_val), side='right') - 1, 0, N_T_BINS - 1))
-            mat[di, ti] += 1
-        return mat
+    def count_d_bins(d_arr, _de=d_edges_global):
+        counts = np.zeros(N_D_BINS, dtype=int)
+        for d_val in d_arr:
+            bi = int(np.clip(np.searchsorted(_de, float(d_val), side="right") - 1, 0, N_D_BINS - 1))
+            counts[bi] += 1
+        return counts
 
-    profile_names = list(all_hits_by_profile.keys())
-    n_profiles = len(profile_names)
-    n_algorithms = len(algorithms)
-    fig_mat = plt.figure(figsize=(6.5 * n_algorithms, 4.5 * n_profiles))
-    outer_gs = gridspec.GridSpec(n_profiles, n_algorithms, figure=fig_mat, wspace=0.35, hspace=0.5)
+    bar_w = 0.15
+    t_offsets = [(i - (len(T_FIXED_VALUES) - 1) / 2) * bar_w for i in range(len(T_FIXED_VALUES))]
+    x_bins = np.arange(N_D_BINS)
 
+    fig_mat, axes_mat = plt.subplots(
+        n_profiles, n_algorithms,
+        figsize=(3.5 * n_algorithms, 2.8 * n_profiles),
+        sharex=True, sharey=False,
+        squeeze=False,
+    )
     for row, profile_name in enumerate(profile_names):
         for col, algorithm in enumerate(algorithms):
-            mdata = all_matrix_data.get(profile_name, {}).get(algorithm)
-            if mdata is None:
-                continue
-
-            counts_mat = rebin_dt(mdata["d_arr"], mdata["t_arr"])
-            dir_counts = mdata["dir_counts"]
-
-            inner_gs = gridspec.GridSpecFromSubplotSpec(
-                2, 1, subplot_spec=outer_gs[row, col], height_ratios=[5, 1.2], hspace=0.2
-            )
-
-            ax_heat = fig_mat.add_subplot(inner_gs[0])
-            ax_heat.imshow(counts_mat, aspect='auto', cmap='YlOrRd', vmin=0, vmax=max(counts_mat.max(), 1))
-            ax_heat.set_xticks(range(N_T_BINS))
-            ax_heat.set_xticklabels(t_labels, fontsize=6, rotation=45)
-            ax_heat.set_yticks(range(N_D_BINS))
-            ax_heat.set_yticklabels(d_labels, fontsize=7)
-            for i in range(N_D_BINS):
-                for j in range(N_T_BINS):
-                    val = counts_mat[i, j]
-                    if val > 0:
-                        ax_heat.text(j, i, str(val), ha='center', va='center', fontsize=7, color='black')
-
+            ax = axes_mat[row, col]
+            for ti, t_fixed in enumerate(T_FIXED_VALUES):
+                d_arr = results_by_t[t_fixed][profile_name][algorithm]["d_arr"]
+                counts = count_d_bins(d_arr)
+                ax.bar(
+                    x_bins + t_offsets[ti], counts, bar_w,
+                    color=T_COLORS[t_fixed], label=f"t={t_fixed}s",
+                    edgecolor="black", linewidth=0.4, alpha=0.85,
+                )
+            ax.set_xticks(x_bins)
+            ax.set_xticklabels(d_bin_labels, fontsize=6, rotation=45)
+            ax.grid(True, axis="y", alpha=0.3)
             if row == 0:
-                ax_heat.set_title(f"{algorithm}", fontsize=9, fontweight='bold')
+                ax.set_title(algorithm, fontsize=9, fontweight="bold")
             if col == 0:
-                ax_heat.set_ylabel(f"{profile_name}\nDistance (m)", fontsize=8)
-            else:
-                ax_heat.set_ylabel("Distance (m)", fontsize=7)
-            ax_heat.set_xlabel("Time (s)", fontsize=7)
+                ax.set_ylabel(f"{profile_name}\nCount", fontsize=8)
+            if row == n_profiles - 1:
+                ax.set_xlabel("Distance bin (m)", fontsize=7)
 
-            ax_dir = fig_mat.add_subplot(inner_gs[1])
-            dir_mat = dir_counts.reshape(1, 5)
-            ax_dir.imshow(dir_mat, aspect='auto', cmap='YlOrRd', vmin=0, vmax=max(dir_counts.max(), 1))
-            ax_dir.set_xticks(range(5))
-            ax_dir.set_xticklabels(dir_angle_labels, fontsize=7)
-            ax_dir.set_yticks([])
-            for j in range(5):
-                ax_dir.text(j, 0, str(dir_counts[j]), ha='center', va='center', fontsize=8, color='black')
-            if col == 0:
-                ax_dir.set_ylabel("Dir", fontsize=8)
-            ax_dir.set_xlabel("Direction (deg)", fontsize=7)
-
+    handles_mat, labels_mat = axes_mat[0, 0].get_legend_handles_labels()
+    fig_mat.legend(handles_mat, labels_mat, loc="upper right", fontsize=9, ncol=len(T_FIXED_VALUES))
     fig_mat.suptitle(
-        "Target Distribution: Distance×Time & Direction — All Algorithms × Profiles",
-        fontsize=14,
-        fontweight='bold',
+        "Distance Distribution — Profiles × Algorithms (color = t_fixed)",
+        fontsize=13, fontweight="bold",
     )
-    fig_mat.savefig(assets_dir / "all_algorithms_matrices.png", dpi=150)
+    fig_mat.tight_layout()
+    fig_mat.savefig(assets_dir / "all_algorithms_matrices.png", dpi=150, bbox_inches="tight")
     plt.close(fig_mat)

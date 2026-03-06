@@ -290,6 +290,8 @@ def plot_rolling_hit_rate(
     if not plotted_any:
         raise ValueError("No non-empty hit series to plot")
 
+    for vx in (25, 50, 100):
+        ax.axvline(x=vx, color='gray', linestyle=':', linewidth=0.8, alpha=0.6)
     ax.set_title(title)
     ax.set_xlabel("Trial")
     ax.set_ylabel("Rolling hit rate")
@@ -344,6 +346,8 @@ def plot_hit_rate_matrix(
             )
             if rolling.size > 0:
                 ax.plot(rolling, linewidth=1.5)
+            for vx in (25, 50, 100):
+                ax.axvline(x=vx, color='gray', linestyle=':', linewidth=0.8, alpha=0.6)
             ax.set_ylim(0.0, 1.0)
             ax.grid(True, alpha=0.3)
             if row == 0:
