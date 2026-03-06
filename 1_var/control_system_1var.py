@@ -7,10 +7,9 @@ Key idea:
 - Track EWMA of margin: m_hat.
 - PI controller pushes a scalar difficulty u in [0,1].
 - Map u -> d_sys and keep t_sys fixed.
-- Keep exploration/diversity and calibration logic from 2-var version.
+- Keep calibration logic from 2-var version.
 """
 
-import math
 import importlib.util
 from pathlib import Path
 
@@ -33,6 +32,26 @@ PatientModel = patient_mod.PatientModel
 # ============================================================
 
 T_FIXED_DEFAULT = 5.0
+PATIENT_FIXED_T = {
+    "overall_weak": 4.0,
+    "overall_medium": 4.0,
+    "overall_strong": 4.0,
+    "highspeed_lowrom": 4.0,
+    "lowspeed_highrom": 4.0,
+}
+
+
+def cap_distance_bounds(patient: PatientModel, d_min: float, d_max: float):
+    """Respect patient's reachable distance ceiling (oracle knowledge)."""
+    patient_reach = float(getattr(patient, "max_reach", d_max))
+    if not np.isfinite(patient_reach) or patient_reach <= 0:
+        patient_reach = float(d_max)
+
+    capped_min = max(float(d_min), 0.0)
+    capped_max = float(min(d_max, patient_reach))
+    if capped_max < capped_min:
+        capped_max = capped_min
+    return capped_min, capped_max
 
 hit_margin = []
 miss_margin = []
@@ -64,13 +83,6 @@ def level5(x, xmin, xmax):
 
 def bin25(d, t, dmin, dmax, tmin, tmax):
     return (level5(d, dmin, dmax), level5(t, tmin, tmax))
-
-
-def rarity_bonus(counts_5x5, i, j, eps=1e-12):
-    """-log(freq) with Laplace smoothing, higher for under-sampled bins."""
-    total = counts_5x5.sum()
-    freq = (counts_5x5[i, j] + 1.0) / (total + 25.0)
-    return -math.log(freq + eps)
 
 
 def distance_level_3(d, dmin, dmax):
@@ -193,6 +205,7 @@ class MarginPIController:
 
         pushing_up = e > 0 and self.u >= 1.0 - 1e-9
         pushing_down = e < 0 and self.u <= 0.0 + 1e-9
+
         if not (pushing_up or pushing_down):
             self.e_int += e
 
@@ -212,60 +225,16 @@ def propose_d_from_u(u, *, dmin=0.10, dmax=1.0):
 def choose_with_exploration_and_diversity(
     d_base,
     *,
-    t_fixed,
-    counts_5x5,
-    dmin,
-    dmax,
     tmin,
     tmax,
-    rng,
-    n_candidates=25,
-    d_sigma=0.05,
-    w_close=1.0,
-    w_rare=0.35,
+    dmin,
+    dmax,
 ):
-    """
-    Build a local candidate set around d_base with fixed t, then pick by:
-    score = -w_close * normalized_distance_to_base + w_rare * rarity_bonus(bin)
-    """
-    cand = []
-    scores = []
-
-    t = float(t_fixed)
-    for _ in range(n_candidates):
-        d = float(np.clip(rng.normal(d_base, d_sigma), dmin, dmax))
-
-        dn = (d - d_base) / (dmax - dmin + 1e-12)
-        close_pen = dn * dn
-
-        i, j = bin25(d, t, dmin, dmax, tmin, tmax)
-        rare = rarity_bonus(counts_5x5, i, j)
-
-        score = -w_close * close_pen + w_rare * rare
-        cand.append((d, t, i, j))
-        scores.append(score)
-
-    s = np.array(scores, dtype=float)
-    s = s - s.max()
-    p = np.exp(s)
-    p = p / p.sum()
-
-    idx = int(rng.choice(len(cand), p=p))
-    d, t, i, j = cand[idx]
-    return d, t, i, j
-
-
-def sample_diagonal_pair(*, dmin, dmax, t_fixed, d_step, rng=None):
-    """
-    In 1-var mode this samples distance only and keeps time fixed.
-    """
-    rng = np.random.default_rng() if rng is None else rng
-    u = rng.uniform(0.0, 1.0)
-    d = dmin + u * (dmax - dmin)
-
-    d = round(d / d_step) * d_step
-
-    return float(d), float(t_fixed)
+    """Deterministic exploitation mapping from PI controller output to actions."""
+    d_sys = float(np.clip(d_base, dmin, dmax))
+    t_sys = float(tmin)
+    i, j = bin25(d_sys, t_sys, dmin, dmax, tmin, tmax)
+    return d_sys, t_sys, i, j
 
 
 # ----------------------------
@@ -276,7 +245,7 @@ def run_sim(
     n_trials=100,
     seed=7,
     # controller targets/tuning
-    m_star=0.0,
+    m_star=0.10,
     Kp=0.9,
     Ki=0.15,
     ewma_alpha=0.15,
@@ -289,16 +258,18 @@ def run_sim(
     # mapping bounds for required speed (kept for compatibility/logging)
     vmin=0.10,
     vmax=1.50,
-    # diagonal resample control
-    diag_after=10,
     calibration=True,
     t_fixed=T_FIXED_DEFAULT,
+    patient_profile: str | None = None,
 ):
     rng = np.random.default_rng(seed)
 
-    t_fixed = float(t_fixed)
-    tmin = t_fixed
-    tmax = t_fixed
+    # if patient_profile is not None and patient_profile in PATIENT_FIXED_T:
+    #     t_fixed = float(PATIENT_FIXED_T[patient_profile])
+    # else:
+    #     t_fixed = float(t_fixed)
+    # tmin = t_fixed
+    # tmax = t_fixed
 
     calibration_result = None
     if calibration:
@@ -309,6 +280,9 @@ def run_sim(
         )
         dmin, dmax = cal_dmin, cal_dmax
         vmin, vmax = cal_vmin, cal_vmax
+    dmin, dmax = cap_distance_bounds(patient, dmin, dmax)
+    if dmin > dmax:
+        dmin, dmax = dmax, dmin
 
     ctrl = MarginPIController(m_star=m_star, Kp=Kp, Ki=Ki, ewma_alpha=ewma_alpha, u0=0.35)
 
@@ -325,45 +299,35 @@ def run_sim(
         "margin": [],
         "m_hat": [],
         "err": [],
-        "bin_i": [],
-        "bin_j": [],
+        # "bin_i": [],
+        # "bin_j": [],
     }
 
     observed_speeds = []
 
     for k in range(n_trials):
+        dmin, dmax = cap_distance_bounds(patient, dmin, dmax)
+        tmin, tmax = float(t_fixed), float(t_fixed)
+
         if k > 0 and k % 50 == 0 and len(observed_speeds) >= 5:
             new_dmin, new_dmax, _new_tmin, _new_tmax, new_vmin, new_vmax, changed = expand_bounds_if_needed(
                 dmin, dmax, tmin, tmax, vmin, vmax, observed_speeds, t_fixed=t_fixed
             )
             if changed:
-                dmin, dmax = new_dmin, new_dmax
+                dmin, dmax = cap_distance_bounds(patient, new_dmin, new_dmax)
                 vmin, vmax = new_vmin, new_vmax
 
-        if diag_after is not None and (k % diag_after == 0):
-            d_sys, t_sys = sample_diagonal_pair(
-                dmin=dmin,
-                dmax=dmax,
-                t_fixed=t_fixed,
-                d_step=d_step,
-                rng=rng,
-            )
-            i, j = bin25(d_sys, t_sys, dmin, dmax, tmin, tmax)
-        else:
-            d_base = propose_d_from_u(ctrl.u, dmin=dmin, dmax=dmax)
+        d_sys = propose_d_from_u(ctrl.u, dmin=dmin, dmax=dmax)
+        t_sys = t_fixed
+        # d_sys, t_sys, i, j = choose_with_exploration_and_diversity(
+        #     d_base,
+        #     dmin=dmin,
+        #     dmax=dmax,
+        #     tmin=tmin,
+        #     tmax=tmax,
+        # )
 
-            d_sys, t_sys, i, j = choose_with_exploration_and_diversity(
-                d_base,
-                t_fixed=t_fixed,
-                counts_5x5=counts_5x5,
-                dmin=dmin,
-                dmax=dmax,
-                tmin=tmin,
-                tmax=tmax,
-                rng=rng,
-            )
-
-        counts_5x5[i, j] += 1
+        # counts_5x5[i, j] += 1
 
         lvl = distance_level_3(d_sys, dmin, dmax)
 
@@ -372,6 +336,7 @@ def run_sim(
             d_sys=d_sys,
             distance_level=lvl,
             previous_hit=previous_hit,
+            direction_bin=int(rng.integers(0, 5)),
         )
 
         hit = bool(outcome["hit"])
@@ -379,24 +344,24 @@ def run_sim(
 
         time_ratio = float(outcome["time_ratio"])
         dist_ratio = float(outcome["dist_ratio"])
+        t_pat = float(outcome["t_pat"])
 
-        m_k = dist_ratio - 1.0
+        # HIT: positive margin = normalized time headroom (how far under the limit the patient was)
+        # MISS: negative margin = distance shortfall (same as before)
         if hit:
+            m_k = (t_sys - t_pat) / max(t_sys, 1e-9)
             hit_margin.append(m_k)
         else:
+            m_k = dist_ratio - 1.0
             miss_margin.append(m_k)
 
         d_pat = dist_ratio * d_sys
-        t_pat = float(outcome["t_pat"])
         if hit and t_pat > 0.01:
             observed_speeds.append(d_pat / t_pat)
         elif t_sys > 0.01:
             observed_speeds.append(d_pat / t_sys)
 
         _u_next, m_hat, err = ctrl.update(m_k)
-
-        if diag_after is not None and (k % diag_after == 0):
-            ctrl.u = (d_sys - dmin) / (dmax - dmin + 1e-12)
 
         hist["u"].append(ctrl.u)
         hist["d"].append(d_sys)
@@ -407,7 +372,7 @@ def run_sim(
         hist["margin"].append(m_k)
         hist["m_hat"].append(m_hat)
         hist["err"].append(err)
-        hist["bin_i"].append(i)
-        hist["bin_j"].append(j)
+        # hist["bin_i"].append(i)
+        # hist["bin_j"].append(j)
 
     return hist, counts_5x5, patient

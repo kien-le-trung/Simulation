@@ -105,6 +105,18 @@ def derive_bounds_from_calibration(calibration_result, patient):
     return float(d_min_cal), float(min(d_max_cal, abs_d_max))
 
 
+def cap_distance_bounds(patient: PatientModel, d_min: float, d_max: float):
+    patient_reach = float(getattr(patient, "max_reach", d_max))
+    if not np.isfinite(patient_reach) or patient_reach <= 0:
+        patient_reach = float(d_max)
+
+    capped_min = max(float(d_min), 0.0)
+    capped_max = float(min(d_max, patient_reach))
+    if capped_max < capped_min:
+        capped_max = capped_min
+    return capped_min, capped_max
+
+
 def cfg_defaults() -> QLearningConfig:
     return QLearningConfig()
 
@@ -203,6 +215,7 @@ def run_sim(
         dmin, dmax = derive_bounds_from_calibration(calibration_result, patient)
         cfg.d_min = dmin
         cfg.d_max = dmax
+    cfg.d_min, cfg.d_max = cap_distance_bounds(patient, cfg.d_min, cfg.d_max)
 
     agent = QLearner(cfg=cfg, rng=rng)
 
@@ -254,6 +267,7 @@ def run_sim(
             d_sys=d_sys,
             distance_level=lvl,
             previous_hit=previous_hit,
+            direction_bin=int(rng.integers(0, 5)),
         )
 
         hit = int(bool(outcome["hit"]))

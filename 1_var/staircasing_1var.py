@@ -11,6 +11,13 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 
 
 T_FIXED = 5.0
+PATIENT_FIXED_T = {
+    "overall_weak": 4.0,
+    "overall_medium": 4.0,
+    "overall_strong": 4.0,
+    "highspeed_lowrom": 4.0,
+    "lowspeed_highrom": 4.0,
+}
 
 
 def _load_module_from_path(module_name, module_path):
@@ -72,13 +79,13 @@ class StaircaseController:
 
     def _make_harder(self) -> None:
         self.d += self.cfg.d_weight * self.cfg.d_step
-        self.d = clamp(self.d, self.cfg.d_min, self.cfg.d_max)
         self.d, self.t = self._quantize(self.d, self.t)
+        self.d = clamp(self.d, self.cfg.d_min, self.cfg.d_max)
 
     def _make_easier(self) -> None:
         self.d -= self.cfg.d_weight * self.cfg.d_step
-        self.d = clamp(self.d, self.cfg.d_min, self.cfg.d_max)
         self.d, self.t = self._quantize(self.d, self.t)
+        self.d = clamp(self.d, self.cfg.d_min, self.cfg.d_max)
 
     def update(self, hit: bool) -> Tuple[float, float, str]:
         if hit:
@@ -161,6 +168,18 @@ def derive_bounds_from_calibration(calibration_result, patient, t_fixed: float =
     return float(d_min_cal), float(min(d_max_cal, ABS_D_MAX)), float(t_fixed), float(t_fixed)
 
 
+def cap_distance_bounds(patient: PatientModel, d_min: float, d_max: float):
+    patient_reach = float(getattr(patient, "max_reach", d_max))
+    if not np.isfinite(patient_reach) or patient_reach <= 0:
+        patient_reach = float(d_max)
+
+    capped_min = max(float(d_min), 0.0)
+    capped_max = float(min(d_max, patient_reach))
+    if capped_max < capped_min:
+        capped_max = capped_min
+    return capped_min, capped_max
+
+
 def expand_bounds_if_needed(d_min, d_max, t_min, t_max, observed_speeds, t_fixed: float = T_FIXED):
     """
     Time is fixed in 1-var mode. Keep bounds unchanged.
@@ -206,11 +225,15 @@ def run_sim(
     t_fixed: float | None = None,
     cfg: StaircaseConfig | None = None,
     calibration: bool = True,
+    patient_profile: str | None = None,
 ) -> Dict[str, List]:
-    if t_fixed is None:
+    if patient_profile is not None and patient_profile in PATIENT_FIXED_T:
+        t_fixed = float(PATIENT_FIXED_T[patient_profile])
+    elif t_fixed is None:
         t_fixed = float(t0)
     else:
         t_fixed = float(t_fixed)
+    rng = np.random.default_rng(seed)
     calibration_result = None
     if calibration:
         calibration_result = patient.calibration()
@@ -229,6 +252,8 @@ def run_sim(
     else:
         cfg.t_min = t_fixed
         cfg.t_max = t_fixed
+
+    cfg.d_min, cfg.d_max = cap_distance_bounds(patient, cfg.d_min, cfg.d_max)
 
     controller = StaircaseController(cfg, d0=d0, t0=t_fixed)
 
@@ -264,6 +289,7 @@ def run_sim(
             d_sys=d_sys,
             distance_level=lvl,
             previous_hit=previous_hit,
+            direction_bin=int(rng.integers(0, 5)),
         )
 
         hit = bool(outcome["hit"])

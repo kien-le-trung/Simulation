@@ -117,6 +117,18 @@ def derive_bounds_from_calibration(calibration_result, patient):
     return float(d_min_cal), float(min(d_max_cal, abs_d_max))
 
 
+def cap_distance_bounds(patient: PatientModel, d_min: float, d_max: float):
+    patient_reach = float(getattr(patient, "max_reach", d_max))
+    if not np.isfinite(patient_reach) or patient_reach <= 0:
+        patient_reach = float(d_max)
+
+    capped_min = max(float(d_min), 0.0)
+    capped_max = float(min(d_max, patient_reach))
+    if capped_max < capped_min:
+        capped_max = capped_min
+    return capped_min, capped_max
+
+
 def build_calibration_prior(calibration_result, posterior_shape, b0, b1, dmin, dmax):
     if not calibration_result:
         return normalize(np.ones(posterior_shape, dtype=float))
@@ -166,6 +178,7 @@ def run_quest_plus_dt(
         calibration_result = patient.calibration()
         apply_calibration_priors(patient, calibration_result)
         dmin, dmax = derive_bounds_from_calibration(calibration_result, patient)
+    dmin, dmax = cap_distance_bounds(patient, dmin, dmax)
 
     if d_grid is None:
         d_grid = np.round(np.arange(dmin, dmax + 0.01, 0.1), 4)
@@ -227,6 +240,7 @@ def run_quest_plus_dt(
             d_sys=d_sys,
             distance_level=lvl,
             previous_hit=prev_hit,
+            direction_bin=int(rng.integers(0, 5)),
         )
         hit = bool(out["hit"])
         prev_hit = hit

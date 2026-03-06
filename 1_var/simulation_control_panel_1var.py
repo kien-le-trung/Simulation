@@ -11,7 +11,7 @@ import numpy as np
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 # 1-var simulation control panel for distance-only optimization algorithms.
-# Time is randomized per trial here to match 2-var/3-var t ranges.
+# Time is fixed per patient profile (borrowed from 0_var); distance is adapted.
 
 PATIENT_PROFILES = {
     "overall_weak": {
@@ -63,6 +63,13 @@ PATIENT_PROFILES = {
 
 T_RANDOM_MIN = 0.3
 T_RANDOM_MAX = 7.0
+PATIENT_FIXED_T = {
+    "overall_weak": 4.0,
+    "overall_medium": 4.0,
+    "overall_strong": 4.0,
+    "highspeed_lowrom": 4.0,
+    "lowspeed_highrom": 4.0,
+}
 
 
 def _load_module_from_path(module_name, module_path):
@@ -298,31 +305,37 @@ def run_algorithm(algorithm_name, *args, patient_profile=None, **kwargs):
             call_kwargs = dict(kwargs)
             seed = int(call_kwargs.get("seed", profile_params.get("seed", 7)))
             rng = np.random.default_rng(seed)
+            t_fixed = PATIENT_FIXED_T.get(patient_profile, T_RANDOM_MAX) if patient_profile else None
 
-            class _RandomizedTimePatient(PatientModel):
-                def __init__(self, *p_args, t_min, t_max, t_rng, **p_kwargs):
+            class _FixedTimeRandomDirectionPatient(PatientModel):
+                def __init__(self, *p_args, t_fixed, direction_rng, **p_kwargs):
                     super().__init__(*p_args, **p_kwargs)
-                    self._t_min = float(t_min)
-                    self._t_max = float(t_max)
-                    self._t_rng = t_rng
+                    self._t_fixed = float(t_fixed) if t_fixed is not None else None
+                    self._dir_rng = direction_rng
                     self._executed_t = []
 
                 def sample_trial(self, *, t_sys, d_sys, distance_level, previous_hit=True, direction_bin=None):
-                    t_rand = float(self._t_rng.uniform(self._t_min, self._t_max))
-                    self._executed_t.append(t_rand)
+                    if self._t_fixed is not None:
+                        t_sys = float(self._t_fixed)
+                    self._executed_t.append(float(t_sys))
+                    if direction_bin is None:
+                        direction_bin = int(self._dir_rng.integers(0, 5))
                     return super().sample_trial(
-                        t_sys=t_rand,
+                        t_sys=t_sys,
                         d_sys=d_sys,
                         distance_level=distance_level,
                         previous_hit=previous_hit,
                         direction_bin=direction_bin,
                     )
 
-            patient = _RandomizedTimePatient(
+            if patient_profile is not None:
+                call_kwargs["patient_profile"] = patient_profile
+            if t_fixed is not None:
+                call_kwargs["t_fixed"] = t_fixed
+            patient = _FixedTimeRandomDirectionPatient(
                 **profile_params,
-                t_min=T_RANDOM_MIN,
-                t_max=T_RANDOM_MAX,
-                t_rng=rng,
+                t_fixed=t_fixed,
+                direction_rng=rng,
             )
             call_kwargs["patient"] = patient
             if args:
@@ -442,7 +455,7 @@ if __name__ == "__main__":
         "control_system_1var",
         "operations_research_1var",
         "staircasing_1var",
-        "logistic_online_1var_v2",
+        "logistic_online_1var",
         "Qlearning_1var",
         "QUEST_1var",
     ]
@@ -463,7 +476,7 @@ if __name__ == "__main__":
         for algorithm in algorithms:
             print(
                 f"Running algorithm: {algorithm} "
-                f"(patient={patient_profile}, t_random=[{T_RANDOM_MIN:.2f}, {T_RANDOM_MAX:.2f}]s)"
+                f"(patient={patient_profile}, t_fixed={PATIENT_FIXED_T.get(patient_profile)}s)"
             )
             result = run_algorithm(
                 algorithm_name=algorithm,

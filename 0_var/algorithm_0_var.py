@@ -32,10 +32,18 @@ viz_mod = _load_module_from_path("tests.visualization", VIS_PATH)
 
 D_MIN, D_MAX = 0.10, 0.80
 T_MIN, T_MAX = 1.0, 7.0
-N_DIRECTIONS = 9
+N_DIRECTIONS = 5
 
 # Canonicalize profiles across 0/1/2/3 var panels.
 PATIENT_PROFILES = _load_shared_patient_profiles()
+# Keep random distance and direction, but use one fixed t per profile for 0-var sweeps.
+PATIENT_FIXED_T = {
+    "overall_weak": 4.0,
+    "overall_medium": 4.0,
+    "overall_strong": 4.0,
+    "highspeed_lowrom": 4.0,
+    "lowspeed_highrom": 4.0,
+}
 
 
 def level5(x: float, xmin: float, xmax: float) -> int:
@@ -78,6 +86,8 @@ def run_random_sim(
     patient: PatientModel,
     n_trials: int = 500,
     seed: int = 7,
+    patient_profile: str | None = None,
+    t_fixed: float | None = None,
 ) -> tuple[dict, np.ndarray]:
     rng = np.random.default_rng(seed)
     counts = np.zeros((5, 5), dtype=int)
@@ -95,9 +105,13 @@ def run_random_sim(
     }
 
     previous_hit = True
+    fixed_t = None if t_fixed is None else float(t_fixed)
+    if fixed_t is None and patient_profile in PATIENT_FIXED_T:
+        fixed_t = float(PATIENT_FIXED_T[patient_profile])
+
     for k in range(n_trials):
         d_sys = float(rng.uniform(D_MIN, D_MAX))
-        t_sys = float(rng.uniform(T_MIN, T_MAX))
+        t_sys = fixed_t if fixed_t is not None else float(rng.uniform(T_MIN, T_MAX))
         direction = int(rng.integers(0, N_DIRECTIONS))
 
         lvl = distance_level_from_patient_bins(patient, d_sys)
@@ -197,7 +211,12 @@ def plot_caterpillars_random_by_profile(
 
     for profile_name, params in PATIENT_PROFILES.items():
         patient = PatientModel(**params)
-        logs, _counts = run_random_sim(patient=patient, n_trials=n_trials, seed=seed)
+        logs, _counts = run_random_sim(
+            patient=patient,
+            n_trials=n_trials,
+            seed=seed,
+            patient_profile=profile_name,
+        )
 
         mean_t, std_t = viz_mod.average_time(logs)
         mean_d, std_d = viz_mod.average_distance(logs)
@@ -261,7 +280,12 @@ def plot_rolling_hit_rate_by_profile(
     hits_by_profile = {}
     for profile_name, params in PATIENT_PROFILES.items():
         patient = PatientModel(**params)
-        logs, _counts = run_random_sim(patient=patient, n_trials=n_trials, seed=seed)
+        logs, _counts = run_random_sim(
+            patient=patient,
+            n_trials=n_trials,
+            seed=seed,
+            patient_profile=profile_name,
+        )
         hits_by_profile[profile_name] = logs.get("hit", [])
 
     viz_mod.plot_rolling_hit_rate(
@@ -276,7 +300,12 @@ def plot_rolling_hit_rate_by_profile(
 
 def main() -> None:
     patient = PatientModel(seed=7)
-    logs, counts = run_random_sim(patient=patient, n_trials=500, seed=7)
+    logs, counts = run_random_sim(
+        patient=patient,
+        n_trials=500,
+        seed=7,
+        patient_profile="overall_medium",
+    )
 
     assets_dir = BASE_DIR / "Assets" / "0_var"
     plot_outputs(logs, counts, assets_dir)

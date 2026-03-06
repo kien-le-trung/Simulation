@@ -26,8 +26,29 @@ PatientModel = patient_mod.PatientModel
 # ----------------------------
 D_MIN, D_MAX = 0.05, 1.0
 T_FIXED_DEFAULT = 5.0
+PATIENT_FIXED_T = {
+    "overall_weak": 4.0,
+    "overall_medium": 4.0,
+    "overall_strong": 4.0,
+    "highspeed_lowrom": 4.0,
+    "lowspeed_highrom": 4.0,
+}
 
-D_STEP = 0.05
+D_STEP = 0.01
+
+
+def cap_distance_bounds(patient: PatientModel, d_min: float, d_max: float):
+    """Restrict distance bounds by patient's ROM ceiling."""
+    patient_reach = float(getattr(patient, "max_reach", d_max))
+    if not np.isfinite(patient_reach) or patient_reach <= 0:
+        patient_reach = float(d_max)
+
+    capped_min = max(float(d_min), 0.0)
+    capped_max = float(min(d_max, patient_reach))
+    if capped_max < capped_min:
+        capped_max = capped_min
+
+    return float(capped_min), float(capped_max)
 
 
 def level5(x, xmin, xmax):
@@ -41,6 +62,14 @@ def level5(x, xmin, xmax):
     if u < 0.8:
         return 3
     return 4
+
+
+def rarity_bonus(counts_5x5, d, d_min=D_MIN, d_max=D_MAX, eps=1e-9):
+    """Bonus for under-sampled distance bins (same -log frequency as 3-var rarity)."""
+    i = level5(d, d_min, d_max)
+    total = float(counts_5x5.sum())
+    freq = (counts_5x5[i, 0] + 1.0) / (total + 25.0)
+    return -math.log(freq + eps)
 
 
 # ----------------------------
@@ -82,41 +111,19 @@ def apply_calibration_priors(patient: PatientModel, calibration_result: dict | N
 
 
 def derive_bounds_from_calibration(calibration_result, patient):
-    abs_d_min, abs_d_max = 0.05, 1.5
-
-    if not calibration_result:
-        return D_MIN, D_MAX
-
-    d_max_cal = max(float(patient.max_reach), 0.20)
-    d_min_cal = abs_d_min
-
-    if d_max_cal - d_min_cal < 0.15:
-        d_max_cal = d_min_cal + 0.15
-
-    return float(d_min_cal), float(min(d_max_cal, abs_d_max))
+    # QUICK TEST: ignore patient ROM hard limit so the controller can explore full d range.
+    # return cap_distance_bounds(patient, D_MIN, D_MAX)
+    return D_MIN, D_MAX
 
 
-def expand_bounds_if_needed(d_min, d_max, observed_speeds, t_fixed):
+def expand_bounds_if_needed(d_min, d_max, observed_speeds, t_fixed, patient_max_reach=None):
     """
     Backup plan for distance-only bounds based on observed speed envelope.
     Never shrinks. Returns (d_min, d_max, changed).
     """
-    abs_d_max = 1.5
-
-    if len(observed_speeds) < 5:
-        return d_min, d_max, False
-
-    arr = np.array(observed_speeds[-50:])
-    v_p95 = float(np.percentile(arr, 95))
-    d_p95 = v_p95 * max(float(t_fixed), 1e-6)
-
-    changed = False
-    new_d_max = min(abs_d_max, max(d_max, d_p95 * 1.2))
-    if new_d_max > d_max * 1.05:
-        d_max = new_d_max
-        changed = True
-
-    return d_min, d_max, changed
+    if d_min != D_MIN or d_max != D_MAX:
+        return float(D_MIN), float(D_MAX), True
+    return float(D_MIN), float(D_MAX), False
 
 
 def make_rom_state(*, d_min: float = D_MIN, d_max: float = D_MAX, n_bins: int = 12):
@@ -170,6 +177,9 @@ def rom_penalty_term(
     m = miss_counts
     n = h + m
 
+    if np.sum(n) < 5 or np.all(m == 0):
+        return 0.0, 0.0, float(np.clip(np.sum(n) / 24.0, 0.0, 1.0)), float(D_MAX)
+
     miss_rate = (m + 1.0) / (n + 2.0)
     miss_severity = (m - miss_ratio_sum + 1.0) / (m + 2.0)
     rom_evidence = miss_rate * miss_severity
@@ -208,7 +218,12 @@ def score_speed_candidate(
     v_hat,
     sigma_v,
     p_star,
+    d_min: float = D_MIN,
+    d_max: float = D_MAX,
     p_min=0.05,
+    counts_5x5=None,
+    w_eff=1.0,
+    w_var=0.20,
     rom_state: dict | None = None,
     trial_index: int = 0,
     rom_warmup_trials: int = 20,
@@ -223,7 +238,16 @@ def score_speed_candidate(
 
     eff_raw = (p - p_star) ** 2
     eff_normalized = 1.0 - eff_raw / (p_star ** 2)
-    score = eff_normalized
+
+    if counts_5x5 is None:
+        var_normalized = 0.0
+    else:
+        var_raw = rarity_bonus(counts_5x5, d_sys, d_min=d_min, d_max=d_max)
+        total = float(counts_5x5.sum())
+        var_max = math.log(total + 25.0) if total > 0 else math.log(25.0)
+        var_normalized = float(var_raw / (var_max + 1e-9))
+
+    score = w_eff * eff_normalized + w_var * var_normalized
     rom_penalty, rom_risk, rom_confidence, rom_boundary = rom_penalty_term(
         d_sys,
         rom_state=rom_state,
@@ -242,13 +266,19 @@ def score_speed_candidate(
 # ----------------------------
 def run_sim(
     patient: PatientModel,
-    n_trials=10000,
+    n_trials=100,
     seed=7,
     ema_alpha=0.20,
-    calibration=True,
+    calibration=False,
     t_fixed=T_FIXED_DEFAULT,
+    patient_profile: str | None = None,
 ):
-    t_fixed = float(t_fixed)
+    if patient_profile is not None and patient_profile in PATIENT_FIXED_T:
+        t_fixed = float(PATIENT_FIXED_T[patient_profile])
+    else:
+        t_fixed = float(t_fixed)
+
+    rng = np.random.default_rng(seed)
 
     cur_d_min, cur_d_max = D_MIN, D_MAX
 
@@ -264,6 +294,7 @@ def run_sim(
         apply_calibration_priors(patient, calibration_result)
         cur_d_min, cur_d_max = derive_bounds_from_calibration(calibration_result, patient)
 
+    cur_d_min, cur_d_max = cap_distance_bounds(patient, cur_d_min, cur_d_max)
     local_d_grid = np.round(np.arange(cur_d_min, cur_d_max + 1e-9, D_STEP), 4)
 
     # Online speed model (EWMA + EW second moment).
@@ -271,16 +302,11 @@ def run_sim(
     if calibration_result:
         v_obs_init = []
         for trial in calibration_result.get("trials", []):
+            if not bool(trial.get("reached", trial.get("hit", False))):
+                continue
             d_sys = float(trial.get("d_sys", 0.0))
-            t_cap = float(trial.get("t_cap", t_fixed))
-            reached = bool(trial.get("reached", trial.get("hit", False)))
-            if reached:
-                t_pat_obs = float(trial.get("t_pat_obs", trial.get("t_pat", t_cap)))
-                v_obs = d_sys / max(t_pat_obs, 1e-6)
-            else:
-                d_pat = float(trial.get("d_pat", float(trial.get("dist_ratio", 0.0)) * d_sys))
-                v_obs = d_pat / max(t_cap, 1e-6)
-            v_obs_init.append(v_obs)
+            t_pat_obs = float(trial.get("t_pat_obs", trial.get("t_pat", t_fixed)))
+            v_obs_init.append(d_sys / max(t_pat_obs, 1e-6))
 
         if len(v_obs_init) > 0:
             v_hat = float(np.mean(v_obs_init))
@@ -289,8 +315,8 @@ def run_sim(
             v_hat = 0.60
             sigma_v = 0.25
     else:
-        v_hat = 0.60
-        sigma_v = 0.25
+        v_hat = 0.20
+        sigma_v = 0.05
 
     m2_hat = v_hat**2 + sigma_v**2
 
@@ -314,15 +340,18 @@ def run_sim(
 
     for k in range(n_trials):
         if k > 0 and k % 50 == 0 and len(observed_speeds) >= 5:
-            new_d_min, new_d_max, changed = expand_bounds_if_needed(
-                cur_d_min,
-                cur_d_max,
-                observed_speeds,
-                t_fixed=t_fixed,
-            )
-            if changed:
-                cur_d_min, cur_d_max = new_d_min, new_d_max
-                local_d_grid = np.round(np.arange(cur_d_min, cur_d_max + 1e-9, D_STEP), 4)
+                new_d_min, new_d_max, changed = expand_bounds_if_needed(
+                    cur_d_min,
+                    cur_d_max,
+                    observed_speeds,
+                    t_fixed=t_fixed,
+                )
+                if changed:
+                    cur_d_min, cur_d_max = new_d_min, new_d_max
+                    local_d_grid = np.round(np.arange(cur_d_min, cur_d_max + 1e-9, D_STEP), 4)
+        cur_d_min, cur_d_max = cap_distance_bounds(patient, cur_d_min, cur_d_max)
+        if len(local_d_grid) == 0 or local_d_grid[-1] > cur_d_max or local_d_grid[0] < cur_d_min:
+            local_d_grid = np.round(np.arange(cur_d_min, cur_d_max + 1e-9, D_STEP), 4)
 
         best_d = None
         best_score = -1e18
@@ -332,7 +361,9 @@ def run_sim(
         best_rom_conf = 0.0
         best_rom_boundary = float(D_MAX)
 
-        for d_cand in local_d_grid:
+        candidate_grid = rng.permutation(local_d_grid)
+
+        for d_cand in candidate_grid:
             v_req = float(d_cand) / max(t_fixed, 1e-9)
             sc, p, rom_penalty, rom_risk, rom_conf, rom_boundary = score_speed_candidate(
                 v_req,
@@ -341,9 +372,14 @@ def run_sim(
                 sigma_v=sigma_v,
                 p_star=p_star,
                 p_min=p_min,
+                d_min=cur_d_min,
+                d_max=cur_d_max,
+                counts_5x5=counts_5x5,
+                w_eff=1.0,
+                w_var=0.20,
                 rom_state=rom_state,
                 trial_index=k,
-                rom_warmup_trials=20,
+                rom_warmup_trials=30,
                 w_rom=0.45,
                 rom_tau_d=0.05,
                 rom_boundary_threshold=0.35,
@@ -365,11 +401,13 @@ def run_sim(
         counts_5x5[i, j] += 1
 
         lvl = distance_level_from_patient_bins(patient, d_sys)
+        direction = int(rng.integers(0, 5))
         outcome = patient.sample_trial(
             t_sys=t_sys,
             d_sys=d_sys,
             distance_level=lvl,
             previous_hit=previous_hit,
+            direction_bin=direction,
         )
         hit = bool(outcome["hit"])
         previous_hit = hit
@@ -384,14 +422,22 @@ def run_sim(
         t_pat = float(outcome["t_pat"])
         if hit and t_pat > 0.01:
             v_obs = d_pat / max(t_pat, 1e-6)
+        elif not hit and float(outcome["dist_ratio"]) > 0.05:
+            # Miss: patient moved dist_ratio * d_sys in t_sys seconds.
+            # This is a lower-bound speed estimate, so use half the normal weight.
+            v_obs = float(outcome["dist_ratio"]) * d_sys / max(t_sys, 1e-6)
         else:
-            v_obs = d_pat / max(t_sys, 1e-6)
-        observed_speeds.append(v_obs)
+            v_obs = None
 
-        alpha = float(np.clip(ema_alpha, 1e-6, 1.0))
-        v_hat = (1.0 - alpha) * v_hat + alpha * v_obs
-        m2_hat = (1.0 - alpha) * m2_hat + alpha * (v_obs ** 2)
-        sigma_v = float(np.sqrt(max(m2_hat - v_hat**2, sigma_v_floor**2)))
+        if v_obs is not None:
+            observed_speeds.append(v_obs)
+            n_obs = len(observed_speeds)
+            alpha = float(np.clip(1.0 / (n_obs + 5), ema_alpha * 0.25, ema_alpha))
+            if not hit:
+                alpha *= 0.75
+            v_hat = (1.0 - alpha) * v_hat + alpha * v_obs
+            m2_hat = (1.0 - alpha) * m2_hat + alpha * (v_obs ** 2)
+            sigma_v = float(np.sqrt(max(m2_hat - v_hat**2, sigma_v_floor**2)))
 
         hist["d"].append(d_sys)
         hist["t"].append(t_sys)
