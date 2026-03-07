@@ -68,7 +68,7 @@ def rarity_bonus(counts_5x5, d, d_min=D_MIN, d_max=D_MAX, eps=1e-9):
     """Bonus for under-sampled distance bins (same -log frequency as 3-var rarity)."""
     i = level5(d, d_min, d_max)
     total = float(counts_5x5.sum())
-    freq = (counts_5x5[i, 0] + 1.0) / (total + 25.0)
+    freq = (counts_5x5[i, 0] + 1.0) / (total + 5.0)
     return -math.log(freq + eps)
 
 
@@ -111,9 +111,7 @@ def apply_calibration_priors(patient: PatientModel, calibration_result: dict | N
 
 
 def derive_bounds_from_calibration(calibration_result, patient):
-    # QUICK TEST: ignore patient ROM hard limit so the controller can explore full d range.
-    # return cap_distance_bounds(patient, D_MIN, D_MAX)
-    return D_MIN, D_MAX
+    return cap_distance_bounds(patient, D_MIN, D_MAX)
 
 
 def expand_bounds_if_needed(d_min, d_max, observed_speeds, t_fixed, patient_max_reach=None):
@@ -231,23 +229,25 @@ def score_speed_candidate(
     rom_tau_d: float = 0.05,
     rom_boundary_threshold: float = 0.35,
 ):
+    # Targeting 0.7 hit rate
     p = p_hit_from_speed(v_req, v_hat, sigma_v)
-
     if p < p_min:
         return -1e9, p, 0.0, 0.0, 0.0, float(D_MAX)
-
     eff_raw = (p - p_star) ** 2
     eff_normalized = 1.0 - eff_raw / (p_star ** 2)
 
+    # Encourage variability
     if counts_5x5 is None:
         var_normalized = 0.0
     else:
         var_raw = rarity_bonus(counts_5x5, d_sys, d_min=d_min, d_max=d_max)
         total = float(counts_5x5.sum())
-        var_max = math.log(total + 25.0) if total > 0 else math.log(25.0)
+        var_max = math.log(total + 5.0) if total > 0 else math.log(5.0)
         var_normalized = float(var_raw / (var_max + 1e-9))
 
     score = w_eff * eff_normalized + w_var * var_normalized
+
+    # Discourage overly long distance
     rom_penalty, rom_risk, rom_confidence, rom_boundary = rom_penalty_term(
         d_sys,
         rom_state=rom_state,
@@ -312,7 +312,7 @@ def run_sim(
             v_hat = float(np.mean(v_obs_init))
             sigma_v = float(max(np.std(v_obs_init), sigma_v_floor))
         else:
-            v_hat = 0.60
+            v_hat = 0.20
             sigma_v = 0.25
     else:
         v_hat = 0.20
@@ -335,6 +335,7 @@ def run_sim(
         "rom_confidence": [],
         "rom_boundary": [],
     }
+
     observed_speeds = []
     rom_state = make_rom_state(d_min=cur_d_min, d_max=cur_d_max)
 
@@ -401,14 +402,15 @@ def run_sim(
         counts_5x5[i, j] += 1
 
         lvl = distance_level_from_patient_bins(patient, d_sys)
-        direction = int(rng.integers(0, 5))
+        
         outcome = patient.sample_trial(
             t_sys=t_sys,
             d_sys=d_sys,
             distance_level=lvl,
             previous_hit=previous_hit,
-            direction_bin=direction,
+            direction_bin=int(rng.integers(0, 5)),
         )
+
         hit = bool(outcome["hit"])
         previous_hit = hit
         update_rom_state(

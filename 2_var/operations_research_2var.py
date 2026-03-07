@@ -324,6 +324,7 @@ def score_candidate(
     var_normalized = var_raw / (var_max + 1e-9)  # 1 = maximally rare bin
 
     score = w_eff * eff_normalized + w_var * var_normalized
+    
     rom_penalty, rom_risk, rom_confidence, rom_boundary = rom_penalty_term(
         d,
         rom_state=rom_state,
