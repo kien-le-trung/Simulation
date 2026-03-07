@@ -240,7 +240,7 @@ def run_quest_plus_dt(
 
     # default grids (keep modest to avoid huge compute)
     if d_grid is None:
-        d_grid = np.round(np.arange(dmin, dmax + 0.01, 0.1), 4)
+        d_grid = np.round(np.arange(dmin, dmax + 0.01, 0.05), 4)
     if t_grid is None:
         t_step = max(0.5, (tmax - tmin) / 12.0)
         t_grid = np.round(np.arange(tmin, tmax + 0.01, t_step), 4)

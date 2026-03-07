@@ -181,7 +181,7 @@ def run_quest_plus_dt(
     dmin, dmax = cap_distance_bounds(patient, dmin, dmax)
 
     if d_grid is None:
-        d_grid = np.round(np.arange(dmin, dmax + 0.01, 0.1), 4)
+        d_grid = np.round(np.arange(dmin, dmax + 0.01, 0.05), 4)
 
     if b0_grid is None:
         b0_grid = np.round(np.linspace(-4.0, 4.0, 7), 4)
@@ -217,9 +217,9 @@ def run_quest_plus_dt(
             eh, p_pred = expected_entropy_for_x(d, posterior, b0, b1)
             cand.append((eh, p_pred, d))
 
+        # Relax search grid when uncertainty is high
         h_current = entropy(posterior)
         h_ratio = h_current / h_max
-
         if h_ratio > 0.8:
             near = cand
         elif h_ratio > 0.4:
