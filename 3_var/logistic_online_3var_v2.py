@@ -387,9 +387,11 @@ def run_controller(
 
         i, j = bin25(d, t, cur_d_min, cur_d_max, cur_t_min, cur_t_max)
 
-        d_sys, t_sys = apply_jitter(d, t, rng, p_jitter=p_jitter,
-                                     d_min=cur_d_min, d_max=cur_d_max,
-                                     t_min=cur_t_min, t_max=cur_t_max)
+        # d_sys, t_sys = apply_jitter(d, t, rng, p_jitter=p_jitter,
+        #                              d_min=cur_d_min, d_max=cur_d_max,
+        #                              t_min=cur_t_min, t_max=cur_t_max)
+
+        d_sys, t_sys = d, t  # --- IGNORE: no jitter for now ---
 
         lvl = distance_level_from_patient_bins(patient, d_sys)
         out = patient.sample_trial(

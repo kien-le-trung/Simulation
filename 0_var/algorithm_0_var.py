@@ -84,7 +84,7 @@ def rolling_mean(values: list[float], window: int = 50) -> np.ndarray:
 
 def run_random_sim(
     patient: PatientModel,
-    n_trials: int = 500,
+    n_trials: int = 200,
     seed: int = 7,
     patient_profile: str | None = None,
     t_fixed: float | None = None,
@@ -111,10 +111,11 @@ def run_random_sim(
 
     for k in range(n_trials):
         d_sys = float(rng.uniform(D_MIN, D_MAX))
-        t_sys = fixed_t if fixed_t is not None else float(rng.uniform(T_MIN, T_MAX))
+        t_sys = fixed_t
         direction = int(rng.integers(0, N_DIRECTIONS))
 
         lvl = distance_level_from_patient_bins(patient, d_sys)
+        
         out = patient.sample_trial(
             t_sys=t_sys,
             d_sys=d_sys,

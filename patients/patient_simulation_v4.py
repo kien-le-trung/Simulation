@@ -131,24 +131,25 @@ class PatientModel:
             }
 
         # ---- 1) sample reaction time (latency) ----
-        # Make reaction slightly worse at higher distance_level (still "natural", no rule switching).
-        # previous_hit only nudges slightly (confidence/fatigue), NOT a hard mode.
+        # Make reaction slightly worse at higher distance_level
         prev_shift = -0.01 if previous_hit else +0.01
         r_mean = self.r_base + 0.05 * lvl + prev_shift
         r = float(self.rng.normal(loc=r_mean, scale=self.r_sigma))
         r = max(r, 0.0)
 
-        # ---- 2) sample speed v ~ Normal(mean=..., sd=...) ----
+        # ---- 2) sample speed v ~ Normal  ----
         v_mean = self._mean_speed(d_sys)
         v_sigma = self._speed_sigma(d_sys)
+
         # Handedness gradient: penalise speed on non-preferred side.
         if idx is not None and self.handedness != 0.0:
             angle_norm = (idx - 2) / 2.0  # bin 0-4 → [-1, +1]
             alignment = self.handedness * angle_norm
             mismatch = max(0.0, -alignment)
             v_mean *= np.exp(-self.k_dir_decay * mismatch)
+
         v = float(self.rng.normal(loc=v_mean, scale=v_sigma))
-        # Truncate to strictly positive to avoid division issues
+
         if v <= 1e-6:
             v = 1e-6
 
@@ -163,12 +164,9 @@ class PatientModel:
             dist_ratio = 1.0
         else:
             hit = False
-            # distance achieved within available movement time (after reaction)
             move_time = max(t_sys - r, 0.0)
             d_pat = min(v * move_time, d_sys)
             t_pat = t_sys
-
-            # per your request: time_ratio should be 1 on misses (not 0)
             time_ratio = 1.0
             dist_ratio = d_pat / max(d_sys, 1e-9)
 

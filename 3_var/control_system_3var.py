@@ -9,9 +9,6 @@ Key idea:
 - Track EWMA of margin: m_hat
 - PI controller pushes a scalar difficulty u in [0,1]
 - Map u -> (d_sys, t_sys) via required speed + ROM ramp, with exploration + diversity
-
-Requires: patient_simulation_v2.py (your simulator)
-File reference: :contentReference[oaicite:0]{index=0}
 """
 
 import math
@@ -218,6 +215,74 @@ class MarginPIController:
 
 
 # ----------------------------
+# Per-direction PI controller for direction selection
+# ----------------------------
+class DirectionPIController:
+    """
+    Per-direction PI controller for direction selection.
+
+    Phases:
+      1. System identification: round-robin probe all directions for probe_rounds rounds.
+      2. Periodic re-identification (dithering): reprobe least-sampled direction every
+         reprobe_interval trials.
+      3. Steady-state: select direction with highest PI output (most comfortable for patient).
+
+    For each direction, tracks EWMA of margin and drives u_dir up for easy directions
+    and down for hard ones, so argmax(u_dir) gives the most suitable direction.
+    """
+    def __init__(
+        self, *,
+        n_directions=5,
+        m_star=0.15,
+        ewma_alpha=0.20,
+        Kp=0.6,
+        Ki=0.10,
+        probe_rounds=3,
+        reprobe_interval=25,
+    ):
+        self.n_directions = n_directions
+        self.m_star = float(m_star)
+        self.ewma_alpha = float(ewma_alpha)
+        self.Kp = float(Kp)
+        self.Ki = float(Ki)
+        self.probe_rounds = probe_rounds
+        self.reprobe_interval = reprobe_interval
+
+        self.m_hat_dir = np.zeros(n_directions, dtype=float)
+        self.n_dir = np.zeros(n_directions, dtype=int)
+        self.u_dir = np.full(n_directions, 0.5)
+        self.e_int_dir = np.zeros(n_directions, dtype=float)
+
+    def select(self, k):
+        """Select direction for trial k."""
+        total_probe_trials = self.n_directions * self.probe_rounds
+        if k < total_probe_trials:
+            # Phase 1 — System identification: round-robin probing of all directions
+            return k % self.n_directions
+        elif k % self.reprobe_interval == 0:
+            # Periodic re-identification: reprobe least-sampled direction
+            return int(np.argmin(self.n_dir))
+        else:
+            # Phase 2 — Steady-state: select direction with highest PI output
+            return int(np.argmax(self.u_dir))
+
+    def update(self, direction, m_k):
+        """Update per-direction EWMA and PI state after observing margin m_k."""
+        self.n_dir[direction] += 1
+        self.m_hat_dir[direction] = (
+            (1.0 - self.ewma_alpha) * self.m_hat_dir[direction]
+            + self.ewma_alpha * float(m_k)
+        )
+        e_dir = self.m_hat_dir[direction] - self.m_star
+        pushing_up = (e_dir > 0 and self.u_dir[direction] >= 1.0 - 1e-9)
+        pushing_down = (e_dir < 0 and self.u_dir[direction] <= 0.0 + 1e-9)
+        if not (pushing_up or pushing_down):
+            self.e_int_dir[direction] += e_dir
+        du = self.Kp * e_dir + self.Ki * self.e_int_dir[direction]
+        self.u_dir[direction] = float(np.clip(self.u_dir[direction] + du, 0.0, 1.0))
+
+
+# ----------------------------
 # Map difficulty u -> (d,t)
 # u is actually the margin of the time and distance ratios
 # ----------------------------
@@ -373,21 +438,7 @@ def run_sim(
     counts_5x5 = np.zeros((5, 5), dtype=int)
     previous_hit = True
 
-    # Per-direction PI controllers (control-theory direction selection)
-    n_directions = 5
-    m_hat_dir = np.zeros(n_directions, dtype=float)
-    n_dir = np.zeros(n_directions, dtype=int)
-    dir_ewma_alpha = 0.20
-    dir_probe_rounds = 3  # rounds of systematic probing per direction (system identification)
-    dir_reprobe_interval = 25  # periodic re-identification (dithering)
-
-    # Per-direction PI state: u_dir[i] = desirability of direction i
-    # High margin (easy) -> positive error -> u_dir rises -> direction preferred
-    # Low margin (hard)  -> negative error -> u_dir falls -> direction avoided
-    u_dir = np.full(n_directions, 0.5)
-    e_int_dir = np.zeros(n_directions, dtype=float)
-    Kp_dir = 0.6
-    Ki_dir = 0.10
+    dir_ctrl = DirectionPIController(m_star=m_star)
 
     hist = {
         "u": [],
@@ -441,17 +492,7 @@ def run_sim(
         lvl = distance_level_3(d_sys, dmin, dmax)
 
         # Direction selection: control-theory approach
-        total_probe_trials = n_directions * dir_probe_rounds
-        if k < total_probe_trials:
-            # Phase 1 — System identification: round-robin probing of all directions
-            direction = k % n_directions
-        elif k % dir_reprobe_interval == 0:
-            # Periodic re-identification (dithering): reprobe least-sampled direction
-            direction = int(np.argmin(n_dir))
-        else:
-            # Phase 2 — Steady-state: select direction with highest PI output.
-            # The per-direction PI drives u_dir up for easy directions, down for hard ones.
-            direction = int(np.argmax(u_dir))
+        direction = dir_ctrl.select(k)
 
         outcome = patient.sample_trial(
             t_sys=t_sys,
@@ -486,17 +527,7 @@ def run_sim(
         elif t_sys > 0.01:
             observed_speeds.append(d_pat / t_sys)
 
-        n_dir[direction] += 1
-        m_hat_dir[direction] = (1.0 - dir_ewma_alpha) * m_hat_dir[direction] + dir_ewma_alpha * m_k
-
-        # Per-direction PI update: drive u_dir toward directions with margin near m_star
-        e_dir = m_hat_dir[direction] - ctrl.m_star
-        pushing_up_dir = (e_dir > 0 and u_dir[direction] >= 1.0 - 1e-9)
-        pushing_down_dir = (e_dir < 0 and u_dir[direction] <= 0.0 + 1e-9)
-        if not (pushing_up_dir or pushing_down_dir):
-            e_int_dir[direction] += e_dir
-        du_dir = Kp_dir * e_dir + Ki_dir * e_int_dir[direction]
-        u_dir[direction] = float(np.clip(u_dir[direction] + du_dir, 0.0, 1.0))
+        dir_ctrl.update(direction, m_k)
 
         u_next, m_hat, err = ctrl.update(m_k)
 

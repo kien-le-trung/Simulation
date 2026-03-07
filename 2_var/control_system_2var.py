@@ -199,7 +199,6 @@ class MarginPIController:
         self.e_int = 0.0
 
     def update(self, m_k):
-        # EWMA of margin
         self.m_hat = (1.0 - self.alpha) * self.m_hat + self.alpha * float(m_k)
 
         # error: positive means too easy -> increase u (harder)
@@ -232,23 +231,31 @@ def propose_dt_from_u(
     """
     Difficulty should increase with:
       - larger distance (ROM demand)
-      - higher required speed v_req = d/t
+      - less time allowed (higher speed demand)
 
     We do:
-      d_base = dmin + u*(dmax-dmin)
-      v_req  = vmin + u*(vmax-vmin)
-      t_base = d_base / v_req
+      random_split decides how much of added difficulty comes from d vs t
+      d_base = dmin + u*(dmax-dmin) * random_split        (increases with u)
+      t_base = tmax - u*(tmax-tmin) * (1-random_split)   (decreases with u)
       then clamp t_base to [tmin,tmax]
 
-    Note: once t is clamped, the realized v_req may deviate; still OK.
+    # OLD (v_req approach):
+    #   d_base = dmin + u*(dmax-dmin)
+    #   v_req  = vmin + u*(vmax-vmin)
+    #   t_base = d_base / v_req
+    #   Note: once t is clamped, the realized v_req may deviate; still OK.
     """
     rng = np.random.default_rng() if rng is None else rng
     random_split = rng.uniform(0.4, 0.6) # decide how much of added difficulty comes from d vs t
 
     d_base = dmin + u * (dmax - dmin) * random_split
-    v_req = vmin + u * (vmax - vmin) * (1.0 - random_split)
 
-    t_base = d_base / max(v_req, 1e-9)
+    # OLD (v_req approach):
+    # v_req = vmin + u * (vmax - vmin) * (1.0 - random_split)
+    # t_base = d_base / max(v_req, 1e-9)
+
+    # NEW: scale t directly in the opposite direction to d
+    t_base = tmax - u * (tmax - tmin) * (1.0 - random_split)
     t_base = float(np.clip(t_base, tmin, tmax))
 
     return float(d_base), float(t_base)
@@ -443,16 +450,17 @@ def run_sim(
         time_ratio = float(outcome["time_ratio"])
         dist_ratio = float(outcome["dist_ratio"])
 
+        d_pat = dist_ratio * d_sys
+        t_pat = float(outcome["t_pat"])
+
         # continuous margin
         if hit:
-            m_k = 1.0 - time_ratio          # >=0 ; bigger => easier
+            m_k = (t_sys - t_pat) / max(t_sys, 1e-9)         # >=0 ; bigger => easier
             hit_margin.append(m_k)
         else:
             m_k = (dist_ratio - 1.0)*0.7    # <=0 ; closer to 0 => near miss
             miss_margin.append(m_k)
 
-        d_pat = dist_ratio * d_sys
-        t_pat = float(outcome["t_pat"])
         if hit and t_pat > 0.01:
             observed_speeds.append(d_pat / t_pat)
         elif t_sys > 0.01:

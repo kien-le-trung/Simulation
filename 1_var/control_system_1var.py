@@ -1,15 +1,4 @@
 from __future__ import annotations
-"""
-Continuous-margin control for selecting distance with fixed time.
-
-Key idea:
-- Convert each trial into a continuous distance margin m_k = dist_ratio - 1.
-- Track EWMA of margin: m_hat.
-- PI controller pushes a scalar difficulty u in [0,1].
-- Map u -> d_sys and keep t_sys fixed.
-- Keep calibration logic from 2-var version.
-"""
-
 import importlib.util
 from pathlib import Path
 
@@ -185,7 +174,8 @@ class MarginPIController:
     Controls difficulty u in [0,1] using distance-only continuous margin feedback.
 
     Margin definition:
-      m = dist_ratio - 1
+      m = dist_ratio - 1 on miss
+      m = (t_sys - t_pat) / t_sys on hit (normalized time headroom)
     """
 
     def __init__(self, *, m_star=0.0, Kp=0.9, Ki=0.15, ewma_alpha=0.15, u0=0.35):
@@ -214,27 +204,10 @@ class MarginPIController:
         return self.u, self.m_hat, e
 
 
-# ----------------------------
-# Map difficulty u -> d (time fixed)
-# ----------------------------
+# map margin to actual distance (how much more percentage of the distance range to use)
 def propose_d_from_u(u, *, dmin=0.10, dmax=1.0):
     d_base = dmin + u * (dmax - dmin)
     return float(d_base)
-
-
-def choose_with_exploration_and_diversity(
-    d_base,
-    *,
-    tmin,
-    tmax,
-    dmin,
-    dmax,
-):
-    """Deterministic exploitation mapping from PI controller output to actions."""
-    d_sys = float(np.clip(d_base, dmin, dmax))
-    t_sys = float(tmin)
-    i, j = bin25(d_sys, t_sys, dmin, dmax, tmin, tmax)
-    return d_sys, t_sys, i, j
 
 
 # ----------------------------
@@ -254,13 +227,11 @@ def run_sim(
     dmax=1.0,
     tmin=T_FIXED_DEFAULT,
     tmax=T_FIXED_DEFAULT,
-    d_step=0.05,
     # mapping bounds for required speed (kept for compatibility/logging)
     vmin=0.10,
     vmax=1.50,
     calibration=True,
     t_fixed=T_FIXED_DEFAULT,
-    patient_profile: str | None = None,
 ):
     rng = np.random.default_rng(seed)
 

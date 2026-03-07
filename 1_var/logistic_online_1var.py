@@ -139,16 +139,16 @@ class DifficultyIndexLogReg:
 
         self._seen = set()
 
-    def predict_p(self, d, t):
+    def predict_p(self, d):
         if len(self._seen) < 2:
             return 0.5
         return float(sigmoid(self.beta0 + self.beta1 * float(d)))
 
-    def uncertainty(self, d, t):
-        p = self.predict_p(d, t)
+    def uncertainty(self, d):
+        p = self.predict_p(d)
         return 1.0 - 2.0 * abs(p - 0.5)
 
-    def update(self, hit, d_exec, t_exec, d_intended, t_intended):
+    def update(self, hit, d_exec):
         y = 1.0 if hit else 0.0
         self._seen.add(int(y))
 
@@ -162,7 +162,7 @@ class DifficultyIndexLogReg:
         self.beta1 = float(np.clip(self.beta1, -8.0, 8.0))
         self.beta0 = float(np.clip(self.beta0, -12.0, 12.0))
 
-        return float(p_exec), d_exec, None
+        return float(p_exec), d_exec
 
 
 def run_controller(
@@ -225,10 +225,10 @@ def run_controller(
         for trial in calibration_result.get("trials", []):
             d_exec = float(trial.get("d_sys", cur_d_min))
             hit = bool(trial.get("hit", False))
-            model.update(hit, d_exec, t_fixed, d_exec, t_fixed)
+            model.update(hit, d_exec)
 
     local_d_grid = np.round(np.arange(cur_d_min, cur_d_max + 1e-9, D_STEP), 4)
-    local_candidates = [(float(d), t_fixed) for d in local_d_grid]
+    local_candidates = [float(d) for d in local_d_grid]
 
     observed_speeds = []
 
@@ -240,22 +240,23 @@ def run_controller(
             if changed:
                 cur_d_min, cur_d_max = new_d_min, new_d_max
                 local_d_grid = np.round(np.arange(cur_d_min, cur_d_max + 1e-9, D_STEP), 4)
-                local_candidates = [(float(d), t_fixed) for d in local_d_grid]
+                local_candidates = [float(d) for d in local_d_grid]
 
         scored = []
-        for d, t in local_candidates:
-            p_pred = model.predict_p(d, t)
-            scored.append((d, t, p_pred))
+        for d in local_candidates:
+            p_pred = model.predict_p(d)
+            scored.append((d, p_pred))
 
-        near_target = [x for x in scored if abs(x[2] - p_star) <= p_tol]
+        near_target = [x for x in scored if abs(x[1] - p_star) <= p_tol]
         pool = near_target if len(near_target) > 0 else scored
 
-        d, t, p_pred_intended = pick_with_tiebreak(
+        d, p_pred_intended = pick_with_tiebreak(
             pool,
-            score_fn=lambda x: abs(x[2] - p_star),
+            score_fn=lambda x: abs(x[1] - p_star),
             rng=rng,
             maximize=False,
         )
+        
         d_sys = float(d)
         t_sys = float(t_fixed)
 
@@ -277,9 +278,9 @@ def run_controller(
         elif t_sys > 0.01:
             observed_speeds.append(d_pat / t_sys)
 
-        p_exec_before = model.predict_p(d_sys, t_sys)
+        p_exec_before = model.predict_p(d_sys)
         p_int_before = p_pred_intended
-        p_exec_after, d_feature, _ = model.update(hit, d_sys, t_sys, d, t)
+        p_exec_after, d_feature = model.update(hit, d_sys)
 
         hit_list.append(int(hit))
         if len(hit_list) >= rolling_window:
@@ -288,7 +289,7 @@ def run_controller(
             roll = float(np.mean(hit_list))
 
         hist["d"].append(d)
-        hist["t"].append(t)
+        hist["t"].append(t_fixed)
         hist["d_sys"].append(d_sys)
         hist["t_sys"].append(t_sys)
         hist["p_pred_intended"].append(float(p_int_before))
