@@ -54,21 +54,27 @@ viz_mod = _load("tests.visualization", BASE_DIR / "tests" / "visualization.py")
 ql1 = _load("Qlearning_1var", BASE_DIR / "1_var" / "Qlearning_1var.py")
 ql2 = _load("Qlearning_2var", BASE_DIR / "2_var" / "Qlearning_2var.py")
 ql3 = _load("Qlearning_3var", BASE_DIR / "3_var" / "Qlearning.py")
+ql1_tab = _load("Qlearning_1var_tabular", BASE_DIR / "1_var" / "Qlearning_1var_tabular.py")
+ql2_tab = _load("Qlearning_2var_tabular", BASE_DIR / "2_var" / "Qlearning_2var_tabular.py")
+ql3_tab = _load("Qlearning_3var_tabular", BASE_DIR / "3_var" / "Qlearning_3var_tabular.py")
 
 # ---------------------------------------------------------------------------
 # Experiment settings
 # ---------------------------------------------------------------------------
-N_TRIALS = 5000
+N_TRIALS = 20000
 SEED = 7
 T_FIXED_1VAR = 4.0   # fixed time used for 1-var (2-var and 3-var adapt t freely)
 
 PROFILE_NAMES = list(PATIENT_PROFILES.keys())
-VAR_LEVELS = ["1-var", "2-var", "3-var"]
+VAR_LEVELS = ["1-var", "2-var", "3-var", "1-var-tabular", "2-var-tabular", "3-var-tabular"]
 
 VAR_COLORS = {
-    "1-var": "#e41a1c",   # red
-    "2-var": "#377eb8",   # blue
-    "3-var": "#4daf4a",   # green
+    "1-var":          "#e41a1c",   # red
+    "2-var":          "#377eb8",   # blue
+    "3-var":          "#4daf4a",   # green
+    "1-var-tabular":  "#ff7f00",   # orange
+    "2-var-tabular":  "#984ea3",   # purple
+    "3-var-tabular":  "#a65628",   # brown
 }
 
 # ---------------------------------------------------------------------------
@@ -117,6 +123,44 @@ for profile_name, params in PATIENT_PROFILES.items():
     avg_d = float(np.mean(logs3["d"]))
     avg_t = float(np.mean(logs3["t"]))
     print(f"    3-var  hit={hr:.3f}  mean_d={avg_d:.3f}  mean_t={avg_t:.3f}")
+
+    # 1-var-tabular
+    patient = PatientModel(**{**params, "seed": SEED})
+    cfg1t = ql1_tab.QLearningConfig()
+    logs1t, counts1t, _ = ql1_tab.run_sim(
+        patient=patient, n_trials=N_TRIALS, seed=SEED,
+        cfg=cfg1t, calibration=True, t_fixed=T_FIXED_1VAR,
+    )
+    results["1-var-tabular"][profile_name] = {"logs": logs1t, "counts": counts1t}
+    hr = np.mean(np.array(logs1t["hit"][-500:], dtype=float))
+    avg_d = float(np.mean(logs1t["d"]))
+    print(f"    1-var-tabular  hit={hr:.3f}  mean_d={avg_d:.3f}  t_fixed={T_FIXED_1VAR}")
+
+    # 2-var-tabular
+    patient = PatientModel(**{**params, "seed": SEED})
+    cfg2t = ql2_tab.QLearningConfig()
+    logs2t, counts2t, _ = ql2_tab.run_sim(
+        patient=patient, n_trials=N_TRIALS, seed=SEED,
+        cfg=cfg2t, calibration=True,
+    )
+    results["2-var-tabular"][profile_name] = {"logs": logs2t, "counts": counts2t}
+    hr = np.mean(np.array(logs2t["hit"][-500:], dtype=float))
+    avg_d = float(np.mean(logs2t["d"]))
+    avg_t = float(np.mean(logs2t["t"]))
+    print(f"    2-var-tabular  hit={hr:.3f}  mean_d={avg_d:.3f}  mean_t={avg_t:.3f}")
+
+    # 3-var-tabular
+    patient = PatientModel(**{**params, "seed": SEED})
+    cfg3t = ql3_tab.QLearningConfig()
+    logs3t, counts3t, _ = ql3_tab.run_sim(
+        patient=patient, n_trials=N_TRIALS, seed=SEED,
+        cfg=cfg3t, calibration=True,
+    )
+    results["3-var-tabular"][profile_name] = {"logs": logs3t, "counts": counts3t}
+    hr = np.mean(np.array(logs3t["hit"][-500:], dtype=float))
+    avg_d = float(np.mean(logs3t["d"]))
+    avg_t = float(np.mean(logs3t["t"]))
+    print(f"    3-var-tabular  hit={hr:.3f}  mean_d={avg_d:.3f}  mean_t={avg_t:.3f}")
 
 # ---------------------------------------------------------------------------
 # Plot 1: Rolling hit rate matrix
